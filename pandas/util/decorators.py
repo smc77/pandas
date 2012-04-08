@@ -1,149 +1,8 @@
-"""
-Pierre G-M's caching decorators
-"""
+from cStringIO import StringIO
 
+from pandas._tseries import cache_readonly
+import sys
 import warnings
-
-__all__ = ['resettable_cache','cache_readonly', 'cache_writable']
-
-#-------------------------------------------------------------------------------
-# Pierre G-M's caching decorators
-
-class CacheWriteWarning(UserWarning):
-    pass
-
-
-class ResettableCache(dict):
-    """
-    Dictionary whose elements mey depend one from another.
-
-    If entry `B` depends on entry `A`, changing the values of entry `A` will
-    reset the value of entry `B` to a default (None); deleteing entry `A` will
-    delete entry `B`.  The connections between entries are stored in a
-    `_resetdict` private attribute.
-
-    Parameters
-    ----------
-    reset : dictionary, optional
-        An optional dictionary, associated a sequence of entries to any key
-        of the object.
-    items : var, optional
-        An optional dictionary used to initialize the dictionary
-
-    Examples
-    --------
-    >>> reset = dict(a=('b',), b=('c',))
-    >>> cache = resettable_cache(a=0, b=1, c=2, reset=reset)
-    >>> assert_equal(cache, dict(a=0, b=1, c=2))
-
-    >>> print "Try resetting a"
-    >>> cache['a'] = 1
-    >>> assert_equal(cache, dict(a=1, b=None, c=None))
-    >>> cache['c'] = 2
-    >>> assert_equal(cache, dict(a=1, b=None, c=2))
-    >>> cache['b'] = 0
-    >>> assert_equal(cache, dict(a=1, b=0, c=None))
-
-    >>> print "Try deleting b"
-    >>> del(cache['a'])
-    >>> assert_equal(cache, {})
-    """
-
-    def __init__(self, reset=None, **items):
-        self._resetdict = reset or {}
-        dict.__init__(self, **items)
-
-    def __setitem__(self, key, value):
-        dict.__setitem__(self, key, value)
-        for mustreset in self._resetdict.get(key, []):
-            self[mustreset] = None
-
-    def __delitem__(self, key):
-        dict.__delitem__(self, key)
-        for mustreset in self._resetdict.get(key, []):
-            del(self[mustreset])
-
-resettable_cache = ResettableCache
-
-class CachedAttribute(object):
-
-    def __init__(self, func, cachename=None, resetlist=None):
-        self.fget = func
-        self.name = func.__name__
-        self.cachename = cachename or '_cache'
-        self.resetlist = resetlist or ()
-
-    def __get__(self, obj, type=None):
-        if obj is None:
-            return self.fget
-        # Get the cache or set a default one if needed
-        _cachename = self.cachename
-        _cache = getattr(obj, _cachename, None)
-        if _cache is None:
-            setattr(obj, _cachename, resettable_cache())
-            _cache = getattr(obj, _cachename)
-        # Get the name of the attribute to set and cache
-        name = self.name
-        _cachedval = _cache.get(name, None)
-#        print "[_cachedval=%s]" % _cachedval
-        if _cachedval is None:
-            # Call the "fget" function
-            _cachedval = self.fget(obj)
-            # Set the attribute in obj
-#            print "Setting %s in cache to %s" % (name, _cachedval)
-            try:
-                _cache[name] = _cachedval
-            except KeyError:
-                setattr(_cache, name, _cachedval)
-            # Update the reset list if needed (and possible)
-            resetlist = self.resetlist
-            if resetlist is not ():
-                try:
-                    _cache._resetdict[name] = self.resetlist
-                except AttributeError:
-                    pass
-#        else:
-#            print "Reading %s from cache (%s)" % (name, _cachedval)
-        return _cachedval
-
-    def __set__(self, obj, value):
-        errmsg = "The attribute '%s' cannot be overwritten" % self.name
-        warnings.warn(errmsg, CacheWriteWarning)
-
-class CachedWritableAttribute(CachedAttribute):
-    #
-    def __set__(self, obj, value):
-        _cache = getattr(obj, self.cachename)
-        name = self.name
-        try:
-            _cache[name] = value
-        except KeyError:
-            setattr(_cache, name, value)
-
-class _cache_readonly(object):
-    """
-    Decorator for CachedAttribute
-    """
-
-    def __init__(self, cachename=None, resetlist=None):
-        self.func = None
-        self.cachename = cachename
-        self.resetlist = resetlist or None
-
-    def __call__(self, func):
-        return CachedAttribute(func,
-                               cachename=self.cachename,
-                               resetlist=self.resetlist)
-cache_readonly = _cache_readonly()
-
-class cache_writable(_cache_readonly):
-    """
-    Decorator for CachedWritableAttribute
-    """
-    def __call__(self, func):
-        return CachedWritableAttribute(func,
-                                       cachename=self.cachename,
-                                       resetlist=self.resetlist)
 
 def deprecate(name, alternative):
     alt_name = alternative.func_name
@@ -153,77 +12,161 @@ def deprecate(name, alternative):
         return alternative(*args, **kwargs)
     return wrapper
 
-if __name__ == "__main__":
-### Tests resettable_cache ----------------------------------------------------
+# Substitution and Appender are derived from matplotlib.docstring (1.1.0)
+# module http://matplotlib.sourceforge.net/users/license.html
 
-    from numpy.testing import *
+class Substitution(object):
+    """
+    A decorator to take a function's docstring and perform string
+    substitution on it.
 
-    reset = dict(a=('b',), b=('c',))
-    cache = resettable_cache(a=0, b=1, c=2, reset=reset)
-    assert_equal(cache, dict(a=0, b=1, c=2))
-    #
-    print "Try resetting a"
-    cache['a'] = 1
-    assert_equal(cache, dict(a=1, b=None, c=None))
-    cache['c'] = 2
-    assert_equal(cache, dict(a=1, b=None, c=2))
-    cache['b'] = 0
-    assert_equal(cache, dict(a=1, b=0, c=None))
-    #
-    print "Try deleting b"
-    del(cache['a'])
-    assert_equal(cache, {})
-### ---------------------------------------------------------------------------
+    This decorator should be robust even if func.__doc__ is None
+    (for example, if -OO was passed to the interpreter)
+
+    Usage: construct a docstring.Substitution with a sequence or
+    dictionary suitable for performing substitution; then
+    decorate a suitable function with the constructed object. e.g.
+
+    sub_author_name = Substitution(author='Jason')
+
+    @sub_author_name
+    def some_function(x):
+        "%(author)s wrote this function"
+
+    # note that some_function.__doc__ is now "Jason wrote this function"
+
+    One can also use positional arguments.
+
+    sub_first_last_names = Substitution('Edgar Allen', 'Poe')
+
+    @sub_first_last_names
+    def some_function(x):
+        "%s %s wrote the Raven"
+    """
+    def __init__(self, *args, **kwargs):
+        assert not (args and kwargs), "Only positional or keyword args are allowed"
+        self.params = args or kwargs
+
+    def __call__(self, func):
+        func.__doc__ = func.__doc__ and func.__doc__ % self.params
+        return func
+
+    def update(self, *args, **kwargs):
+        "Assume self.params is a dict and update it with supplied args"
+        self.params.update(*args, **kwargs)
+
+    @classmethod
+    def from_params(cls, params):
+        """
+        In the case where the params is a mutable sequence (list or dictionary)
+        and it may change before this class is called, one may explicitly use a
+        reference to the params rather than using *args or **kwargs which will
+        copy the values and not reference them.
+        """
+        result = cls()
+        result.params = params
+        return result
+
+class Appender(object):
+    """
+    A function decorator that will append an addendum to the docstring
+    of the target function.
+
+    This decorator should be robust even if func.__doc__ is None
+    (for example, if -OO was passed to the interpreter).
+
+    Usage: construct a docstring.Appender with a string to be joined to
+    the original docstring. An optional 'join' parameter may be supplied
+    which will be used to join the docstring and addendum. e.g.
+
+    add_copyright = Appender("Copyright (c) 2009", join='\n')
+
+    @add_copyright
+    def my_dog(has='fleas'):
+        "This docstring will have a copyright below"
+        pass
+    """
+    def __init__(self, addendum, join='', indents=0):
+        if indents > 0:
+            self.addendum = indent(addendum, indents=indents)
+        else:
+            self.addendum = addendum
+        self.join = join
+
+    def __call__(self, func):
+        docitems = [func.__doc__ if func.__doc__ else '', self.addendum]
+        func.__doc__ = ''.join(docitems)
+        return func
+
+def indent(text, indents=1):
+    if not text or type(text) != str:
+        return ''
+    jointext = ''.join(['\n'] + ['    '] * indents)
+    return jointext.join(text.split('\n'))
+
+def suppress_stdout(f):
+    def wrapped(*args, **kwargs):
+        try:
+            sys.stdout = StringIO()
+            f(*args, **kwargs)
+        finally:
+            sys.stdout = sys.__stdout__
+
+    return wrapped
 
 
-    class Example(object):
-        #
-        def __init__(self):
-            self._cache = resettable_cache()
-            self.a = 0
-        #
-        @cache_readonly
-        def b(self):
-            return 1
-        @cache_writable(resetlist='d')
-        def c(self):
-            return 2
-        @cache_writable(resetlist=('e', 'f'))
-        def d(self):
-            return self.c + 1
-        #
-        @cache_readonly
-        def e(self):
-            return 4
-        @cache_readonly
-        def f(self):
-            return self.e + 1
+class KnownFailureTest(Exception):
+    '''Raise this exception to mark a test as a known failing test.'''
+    pass
 
-    ex = Example()
-    print "(attrs  : %s)" % str(ex.__dict__)
-    print "(cached : %s)" % str(ex._cache)
-    print "Try a   :", ex.a
-    print "Try accessing/setting a readonly attribute"
-    assert_equal(ex.__dict__, dict(a=0, _cache={}))
-    print "Try b #1:", ex.b
-    b = ex.b
-    assert_equal(b, 1)
-    assert_equal(ex.__dict__, dict(a=0, _cache=dict(b=1,)))
-#   assert_equal(ex.__dict__, dict(a=0, b=1, _cache=dict(b=1)))
-    ex.b = -1
-    print "Try dict", ex.__dict__
-    assert_equal(ex._cache, dict(b=1,))
-    #
-    print "Try accessing/resetting a cachewritable attribute"
-    c = ex.c
-    assert_equal(c, 2)
-    assert_equal(ex._cache, dict(b=1, c=2))
-    d = ex.d
-    assert_equal(d, 3)
-    assert_equal(ex._cache, dict(b=1, c=2, d=3))
-    ex.c = 0
-    assert_equal(ex._cache, dict(b=1, c=0, d=None, e=None, f=None))
-    d = ex.d
-    assert_equal(ex._cache, dict(b=1, c=0, d=1, e=None, f=None))
-    ex.d = 5
-    assert_equal(ex._cache, dict(b=1, c=0, d=5, e=None, f=None))
+def knownfailureif(fail_condition, msg=None):
+    """
+    Make function raise KnownFailureTest exception if given condition is true.
+
+    If the condition is a callable, it is used at runtime to dynamically
+    make the decision. This is useful for tests that may require costly
+    imports, to delay the cost until the test suite is actually executed.
+
+    Parameters
+    ----------
+    fail_condition : bool or callable
+        Flag to determine whether to mark the decorated test as a known
+        failure (if True) or not (if False).
+    msg : str, optional
+        Message to give on raising a KnownFailureTest exception.
+        Default is None.
+
+    Returns
+    -------
+    decorator : function
+        Decorator, which, when applied to a function, causes SkipTest
+        to be raised when `skip_condition` is True, and the function
+        to be called normally otherwise.
+
+    Notes
+    -----
+    The decorator itself is decorated with the ``nose.tools.make_decorator``
+    function in order to transmit function name, and various other metadata.
+
+    """
+    if msg is None:
+        msg = 'Test skipped due to known failure'
+
+    # Allow for both boolean or callable known failure conditions.
+    if callable(fail_condition):
+        fail_val = fail_condition
+    else:
+        fail_val = lambda: fail_condition
+
+    def knownfail_decorator(f):
+        # Local import to avoid a hard nose dependency and only incur the
+        # import time overhead at actual test-time.
+        import nose
+        def knownfailer(*args, **kwargs):
+            if fail_val():
+                raise KnownFailureTest, msg
+            else:
+                return f(*args, **kwargs)
+        return nose.tools.make_decorator(f)(knownfailer)
+
+    return knownfail_decorator

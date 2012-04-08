@@ -24,11 +24,6 @@ Package overview
  * Static and moving window linear and `panel regression
    <http://en.wikipedia.org/wiki/Panel_data>`__
 
-License
--------
-
-pandas is released under a standard 3-clause BSD license
-
 Data structures at a glance
 ---------------------------
 
@@ -77,21 +72,50 @@ Mutability and copying of data
 ------------------------------
 
 All pandas data structures are value-mutable (the values they contain can be
-altered) but not always size-mutable. The length of a Series cannot be changed,
-but, for example, columns can be inserted into a DataFrame. However, the vast
-majority of methods produce new objects and leave the input data untouched. In
-general, though, we like to **favor immutability** where sensible.
+altered) but not always size-mutable. The length of a Series cannot be
+changed, but, for example, columns can be inserted into a DataFrame. However,
+the vast majority of methods produce new objects and leave the input data
+untouched. In general, though, we like to **favor immutability** where
+sensible.
 
+Getting Support
+---------------
 
-History
+The first stop for pandas issues and ideas is the `Github Issue Tracker
+<https://github.com/pydata/pandas/issues>`__. If you have a general question,
+pandas community experts can answer through `Stack Overflow
+<http://stackoverflow.com/questions/tagged/pandas>`__.
+
+Longer discussions occur on the `developer mailing list
+<http://groups.google.com/group/pystatsmodels>`__, and commercial support
+inquiries for Lambda Foundry should be sent to: support@lambdafoundry.com
+
+Credits
 -------
 
 pandas development began at `AQR Capital Management <http://www.aqr.com>`__ in
-April 2008. It was open-sourced at the end of 2009 and continues to be actively
-used and maintained.
+April 2008. It was open-sourced at the end of 2009. AQR continued to provide
+resources for development through the end of 2011, and continues to contribute
+bug reports today.
 
-Contact
+Since January 2012, `Lambda Foundry <http://www.lambdafoundry.com>`__, has
+been providing development resources, as well as commercial support, 
+training, and consulting for pandas.
+
+pandas is only made possible by a group of people around the world like you
+who have contributed new code, bug reports, fixes, comments and ideas. A
+complete list can be found `on Github <http://www.github.com/pydata/pandas/contributors>`__.
+
+Development Team
+----------------
+
+pandas is a part of the PyData project. The PyData Development Team is a
+collection of developers focused on the improvement of Python's data
+libraries. The core team that coordinates development can be found on `Github
+<http://github.com/pydata>`__. If you're interested in contributing, please
+visit the `project website <http://pandas.pydata.org>`__.
+  
+License
 -------
 
-Please feel free to send comments or questions directly to Wes McKinney at
-wesmckinn (-at-) gmail (-dot-) com or the pystatsmodels mailing list.
+.. literalinclude:: ../../LICENSE

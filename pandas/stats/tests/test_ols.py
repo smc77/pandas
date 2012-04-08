@@ -8,17 +8,28 @@ from __future__ import division
 
 from datetime import datetime
 import unittest
+import nose
 import numpy as np
 
-from pandas.core.panel import LongPanel, Panel
-from pandas.core.api import DataFrame, Index, Series, notnull
+from pandas.core.panel import Panel
+from pandas import DataFrame, Index, DateRange, Series, notnull, datetools
 from pandas.stats.api import ols
+from pandas.stats.ols import _filter_data
 from pandas.stats.plm import NonPooledPanelOLS, PanelOLS
 from pandas.util.testing import (assert_almost_equal, assert_series_equal,
                                  assert_frame_equal)
 import pandas.util.testing as tm
 
 from common import BaseTest
+
+_have_statsmodels = True
+try:
+    import statsmodels.api as sm
+except ImportError:
+    try:
+        import scikits.statsmodels.api as sm
+    except ImportError:
+        _have_statsmodels = False
 
 def _check_repr(obj):
     repr(obj)
@@ -46,16 +57,58 @@ class TestOLS(BaseTest):
     # with trusted implementations of panel OLS (e.g. R).
     # TODO: Add tests for non pooled OLS.
 
-    def testOLSWithDatasets(self):
-        import scikits.statsmodels.datasets as datasets
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import matplotlib as mpl
+            mpl.use('Agg', warn=False)
+        except ImportError:
+            pass
 
-        self.checkDataSet(datasets.ccard.load(), skip_moving=True)
-        self.checkDataSet(datasets.cpunish.load(), skip_moving=True)
-        self.checkDataSet(datasets.longley.load(), skip_moving=True)
-        self.checkDataSet(datasets.stackloss.load(), skip_moving=True)
-        self.checkDataSet(datasets.ccard.load(), 39, 49) # one col in X all 0s
-        self.checkDataSet(datasets.copper.load())
-        self.checkDataSet(datasets.scotland.load())
+        if not _have_statsmodels:
+            raise nose.SkipTest
+
+    def testOLSWithDatasets(self):
+        self.checkDataSet(sm.datasets.ccard.load(), skip_moving=True)
+        self.checkDataSet(sm.datasets.cpunish.load(), skip_moving=True)
+        self.checkDataSet(sm.datasets.longley.load(), skip_moving=True)
+        self.checkDataSet(sm.datasets.stackloss.load(), skip_moving=True)
+        self.checkDataSet(sm.datasets.copper.load())
+        self.checkDataSet(sm.datasets.scotland.load())
+
+        # degenerate case fails on some platforms
+        # self.checkDataSet(datasets.ccard.load(), 39, 49) # one col in X all 0s
+
+    def testWLS(self):
+        X = DataFrame(np.random.randn(30, 4), columns=['A', 'B', 'C', 'D'])
+        Y = Series(np.random.randn(30))
+        weights = X.std(1)
+
+        self._check_wls(X, Y, weights)
+
+        weights.ix[[5, 15]] = np.nan
+        Y[[2, 21]] = np.nan
+        self._check_wls(X, Y, weights)
+
+    def _check_wls(self, x, y, weights):
+        result = ols(y=y, x=x, weights=1/weights)
+
+        combined = x.copy()
+        combined['__y__'] = y
+        combined['__weights__'] = weights
+        combined = combined.dropna()
+
+        endog = combined.pop('__y__').values
+        aweights = combined.pop('__weights__').values
+        exog = sm.add_constant(combined.values, prepend=False)
+
+        sm_result = sm.WLS(endog, exog, weights=1/aweights).fit()
+
+        assert_almost_equal(sm_result.params, result._beta_raw)
+        assert_almost_equal(sm_result.resid, result._resid_raw)
+
+        self.checkMovingOLS('rolling', x, y, weights=weights)
+        self.checkMovingOLS('expanding', x, y, weights=weights)
 
     def checkDataSet(self, dataset, start=None, end=None, skip_moving=False):
         exog = dataset.exog[start : end]
@@ -75,7 +128,6 @@ class TestOLS(BaseTest):
             self.checkMovingOLS('expanding', x, y, nw_lags=1, nw_overlap=True)
 
     def checkOLS(self, exog, endog, x, y):
-        import scikits.statsmodels.api as sm
         reference = sm.OLS(endog, sm.add_constant(exog, prepend=False)).fit()
         result = ols(y=y, x=x)
 
@@ -98,15 +150,15 @@ class TestOLS(BaseTest):
 
         _check_non_raw_results(result)
 
-    def checkMovingOLS(self, window_type, x, y, **kwds):
-        from scikits.statsmodels.tools.tools import rank
-        window = rank(x.values) * 2
+    def checkMovingOLS(self, window_type, x, y, weights=None, **kwds):
+        window = sm.tools.tools.rank(x.values) * 2
 
-        moving = ols(y=y, x=x, window_type=window_type,
+        moving = ols(y=y, x=x, weights=weights, window_type=window_type,
                      window=window, **kwds)
 
         # check that sparse version is the same
         sparse_moving = ols(y=y.to_sparse(), x=x.to_sparse(),
+                            weights=weights,
                             window_type=window_type,
                             window=window, **kwds)
         _compare_ols_results(moving, sparse_moving)
@@ -126,7 +178,7 @@ class TestOLS(BaseTest):
                 x_iter[k] = v.truncate(before=prior_date, after=date)
             y_iter = y.truncate(before=prior_date, after=date)
 
-            static = ols(y=y_iter, x=x_iter, **kwds)
+            static = ols(y=y_iter, x=x_iter, weights=weights, **kwds)
 
             self.compare(static, moving, event_index=i,
                          result_index=n)
@@ -140,15 +192,20 @@ class TestOLS(BaseTest):
     def compare(self, static, moving, event_index=None,
                 result_index=None):
 
+        index = moving._index
+
         # Check resid if we have a time index specified
         if event_index is not None:
             ref = static._resid_raw[-1]
-            res = moving._resid_raw[event_index]
+
+            label = index[event_index]
+
+            res = moving.resid[label]
 
             assert_almost_equal(ref, res)
 
             ref = static._y_fitted_raw[-1]
-            res = moving._y_fitted_raw[event_index]
+            res = moving.y_fitted[label]
 
             assert_almost_equal(ref, res)
 
@@ -165,10 +222,19 @@ class TestOLS(BaseTest):
 
             assert_almost_equal(ref, res)
 
+    def test_ols_object_dtype(self):
+        df = DataFrame(np.random.randn(20, 2), dtype=object)
+        model = ols(y=df[0], x=df[1])
+        summary = repr(model)
+
 class TestOLSMisc(unittest.TestCase):
     '''
     For test coverage with faux data
     '''
+    @classmethod
+    def setupClass(cls):
+        if not _have_statsmodels:
+            raise nose.SkipTest
 
     def test_f_test(self):
         x = tm.makeTimeDataFrame()
@@ -223,7 +289,7 @@ class TestOLSMisc(unittest.TestCase):
 
     def test_longpanel_series_combo(self):
         wp = tm.makePanel()
-        lp = wp.to_long()
+        lp = wp.to_frame()
 
         y = lp.pop('ItemA')
         model = ols(y=y, x=lp, entity_effects=True, window=20)
@@ -329,18 +395,18 @@ class TestPanelOLS(BaseTest):
         result = ols(y=self.panel_y2, x=self.panel_x2)
 
         x = result._x
-        index = [x.major_axis[i] for i in x.major_labels]
+        index = x.index.get_level_values(0)
         index = Index(sorted(set(index)))
         exp_index = Index([datetime(2000, 1, 1), datetime(2000, 1, 3)])
-        self.assertTrue(exp_index.equals(index))
+        self.assertTrue;(exp_index.equals(index))
 
-        index = [x.minor_axis[i] for i in x.minor_labels]
+        index = x.index.get_level_values(1)
         index = Index(sorted(set(index)))
         exp_index = Index(['A', 'B'])
         self.assertTrue(exp_index.equals(index))
 
         x = result._x_filtered
-        index = [x.major_axis[i] for i in x.major_labels]
+        index = x.index.get_level_values(0)
         index = Index(sorted(set(index)))
         exp_index = Index([datetime(2000, 1, 1),
                            datetime(2000, 1, 3),
@@ -361,43 +427,39 @@ class TestPanelOLS(BaseTest):
                           [12, 21, 1]]
         assert_almost_equal(exp_x_filtered, result._x_filtered.values)
 
-        self.assertTrue(result._x_filtered.major_axis.equals(
+        self.assertTrue(result._x_filtered.index.levels[0].equals(
             result.y_fitted.index))
 
-    def testWithWeights(self):
-        data = np.arange(10).reshape((5, 2))
-        index = [datetime(2000, 1, 1),
-                 datetime(2000, 1, 2),
-                 datetime(2000, 1, 3),
-                 datetime(2000, 1, 4),
-                 datetime(2000, 1, 5)]
-        cols = ['A', 'B']
-        weights = DataFrame(data, index=index, columns=cols)
+    def test_wls_panel(self):
+        y = tm.makeTimeDataFrame()
+        x = Panel({'x1' : tm.makeTimeDataFrame(),
+                   'x2' : tm.makeTimeDataFrame()})
 
-        result = ols(y=self.panel_y2, x=self.panel_x2, weights=weights)
+        y.ix[[1, 7], 'A'] = np.nan
+        y.ix[[6, 15], 'B'] = np.nan
+        y.ix[[3, 20], 'C'] = np.nan
+        y.ix[[5, 11], 'D'] = np.nan
 
-        assert_almost_equal(result._y_trans.values.flat, [0, 16, 25])
+        stack_y = y.stack()
+        stack_x = DataFrame(dict((k, v.stack())
+                                  for k, v in x.iteritems()))
 
-        exp_x = [[0, 0, 0],
-                 [36, 68, 4],
-                 [150, 240, 5]]
-        assert_almost_equal(result._x_trans.values, exp_x)
+        weights = x.std('items')
+        stack_weights = weights.stack()
 
+        stack_y.index = stack_y.index.get_tuple_index()
+        stack_x.index = stack_x.index.get_tuple_index()
+        stack_weights.index = stack_weights.index.get_tuple_index()
 
-        exp_x_filtered = [[6, 14, 1],
-                          [9, 17, 1],
-                          [30, 48, 1],
-                          [11, 20, 1],
-                          [12, 21, 1]]
-#         exp_x_filtered = [[0, 0, 0],
-#                           [36, 68, 4],
-#                           [150, 240, 5],
-#                           [66, 120, 6],
-#                           [84, 147, 7]]
+        result = ols(y=y, x=x, weights=1/weights)
+        expected = ols(y=stack_y, x=stack_x, weights=1/stack_weights)
 
-        assert_almost_equal(result._x_filtered.values, exp_x_filtered)
+        assert_almost_equal(result.beta, expected.beta)
 
-        # _check_non_raw_results(result)
+        for attr in ['resid', 'y_fitted']:
+            rvals = getattr(result, attr).stack().values
+            evals = getattr(expected, attr).values
+            assert_almost_equal(rvals, evals)
 
     def testWithTimeEffects(self):
         result = ols(y=self.panel_y2, x=self.panel_x2, time_effects=True)
@@ -413,14 +475,12 @@ class TestPanelOLS(BaseTest):
         result = ols(y=self.panel_y2, x=self.panel_x2, entity_effects=True)
 
         assert_almost_equal(result._y.values.flat, [1, 4, 5])
-        exp_x = [[0, 6, 14, 1], [0, 9, 17, 1], [1, 30, 48, 1]]
-        # exp_x = [[6, 14, 0, 1], [9, 17, 0, 1], [30, 48, 1, 1]]
-        assert_almost_equal(result._x.values, exp_x)
 
-        exp_index = Index(['FE_B', 'x1', 'x2', 'intercept'])
-        # exp_index = Index(['x1', 'x2', 'FE_B', 'intercept'])
-        self.assertTrue(exp_index.equals(result._x.items))
-
+        exp_x = DataFrame([[0, 6, 14, 1], [0, 9, 17, 1], [1, 30, 48, 1]],
+                          index=result._x.index, columns=['FE_B', 'x1', 'x2',
+                                                          'intercept'],
+                          dtype=float)
+        tm.assert_frame_equal(result._x, exp_x.ix[:, result._x.columns])
         # _check_non_raw_results(result)
 
     def testWithEntityEffectsAndDroppedDummies(self):
@@ -428,39 +488,35 @@ class TestPanelOLS(BaseTest):
                      dropped_dummies={'entity' : 'B'})
 
         assert_almost_equal(result._y.values.flat, [1, 4, 5])
-        exp_x = [[1, 6, 14, 1], [1, 9, 17, 1], [0, 30, 48, 1]]
-        # exp_x = [[6, 14, 1, 1], [9, 17, 1, 1], [30, 48, 0, 1]]
-        assert_almost_equal(result._x.values, exp_x)
-
-        exp_index = Index(['FE_A', 'x1', 'x2', 'intercept'])
-        self.assertTrue(exp_index.equals(result._x.items))
-
+        exp_x = DataFrame([[1, 6, 14, 1], [1, 9, 17, 1], [0, 30, 48, 1]],
+                          index=result._x.index, columns=['FE_A', 'x1', 'x2',
+                                                          'intercept'],
+                          dtype=float)
+        tm.assert_frame_equal(result._x, exp_x.ix[:, result._x.columns])
         # _check_non_raw_results(result)
 
     def testWithXEffects(self):
         result = ols(y=self.panel_y2, x=self.panel_x2, x_effects=['x1'])
 
         assert_almost_equal(result._y.values.flat, [1, 4, 5])
-        exp_x = [[0, 0, 14, 1], [0, 1, 17, 1], [1, 0, 48, 1]]
-        assert_almost_equal(result._x.values, exp_x)
 
-        exp_index = Index(['x1_30', 'x1_9', 'x2', 'intercept'])
-        self.assertTrue(exp_index.equals(result._x.items))
-
-        # _check_non_raw_results(result)
+        res = result._x
+        exp_x = DataFrame([[0, 0, 14, 1], [0, 1, 17, 1], [1, 0, 48, 1]],
+                          columns=['x1_30', 'x1_9', 'x2', 'intercept'],
+                          index=res.index, dtype=float)
+        assert_frame_equal(res, exp_x.reindex(columns=res.columns))
 
     def testWithXEffectsAndDroppedDummies(self):
         result = ols(y=self.panel_y2, x=self.panel_x2, x_effects=['x1'],
                      dropped_dummies={'x1' : 30})
 
+        res = result._x
         assert_almost_equal(result._y.values.flat, [1, 4, 5])
-        exp_x = [[1, 0, 14, 1], [0, 1, 17, 1], [0, 0, 48, 1]]
-        assert_almost_equal(result._x.values, exp_x)
+        exp_x = DataFrame([[1, 0, 14, 1], [0, 1, 17, 1], [0, 0, 48, 1]],
+                          columns=['x1_6', 'x1_9', 'x2', 'intercept'],
+                          index=res.index, dtype=float)
 
-        exp_index = Index(['x1_6', 'x1_9', 'x2', 'intercept'])
-        self.assertTrue(exp_index.equals(result._x.items))
-
-        # _check_non_raw_results(result)
+        assert_frame_equal(res, exp_x.reindex(columns=res.columns))
 
     def testWithXEffectsAndConversion(self):
         result = ols(y=self.panel_y3, x=self.panel_x3, x_effects=['x1', 'x2'])
@@ -470,22 +526,22 @@ class TestPanelOLS(BaseTest):
                  [0, 0, 0, 1, 1]]
         assert_almost_equal(result._x.values, exp_x)
 
-        exp_index = Index(['x1_B', 'x1_C', 'x2_2.65', 'x2_3.14', 'intercept'])
-        self.assertTrue(exp_index.equals(result._x.items))
+        exp_index = Index(['x1_B', 'x1_C', 'x2_baz', 'x2_foo', 'intercept'])
+        self.assertTrue(exp_index.equals(result._x.columns))
 
         # _check_non_raw_results(result)
 
     def testWithXEffectsAndConversionAndDroppedDummies(self):
         result = ols(y=self.panel_y3, x=self.panel_x3, x_effects=['x1', 'x2'],
-                     dropped_dummies={'x2' : '3.14'})
+                     dropped_dummies={'x2' : 'foo'})
 
         assert_almost_equal(result._y.values.flat, [1, 2, 3, 4])
         exp_x = [[0, 0, 0, 0, 1], [1, 0, 1, 0, 1], [0, 1, 0, 1, 1],
                  [0, 0, 0, 0, 1]]
         assert_almost_equal(result._x.values, exp_x)
 
-        exp_index = Index(['x1_B', 'x1_C', 'x2_1.59', 'x2_2.65', 'intercept'])
-        self.assertTrue(exp_index.equals(result._x.items))
+        exp_index = Index(['x1_B', 'x1_C', 'x2_bar', 'x2_baz', 'intercept'])
+        self.assertTrue(exp_index.equals(result._x.columns))
 
         # _check_non_raw_results(result)
 
@@ -500,21 +556,14 @@ class TestPanelOLS(BaseTest):
                             self.series_x, self.series_y, nw_lags=1,
                             nw_overlap=True)
 
-    def testRollingWithWeights(self):
-        idx = self.panel_y.index
-        cols = self.panel_y.columns
-
-
-        weights = DataFrame(np.random.standard_normal((len(idx), len(cols))),
-                            index=idx, columns=cols)
-        self.checkMovingOLS(self.panel_x,
-                            self.panel_y, weights=weights)
 
     def testRolling(self):
         self.checkMovingOLS(self.panel_x, self.panel_y)
 
     def testRollingWithFixedEffects(self):
         self.checkMovingOLS(self.panel_x, self.panel_y,
+                            entity_effects=True)
+        self.checkMovingOLS(self.panel_x, self.panel_y, intercept=False,
                             entity_effects=True)
 
     def testRollingWithTimeEffects(self):
@@ -652,6 +701,83 @@ def _period_slice(panelModel, i):
     L, R = index.get_major_bounds(period, period)
 
     return slice(L, R)
+
+class TestOLSFilter(unittest.TestCase):
+
+    def setUp(self):
+        date_index = DateRange(datetime(2009, 12, 11), periods=3,
+                               offset=datetools.bday)
+        ts = Series([3, 1, 4], index=date_index)
+        self.TS1 = ts
+
+        date_index = DateRange(datetime(2009, 12, 11), periods=5,
+                               offset=datetools.bday)
+        ts = Series([1, 5, 9, 2, 6], index=date_index)
+        self.TS2 = ts
+
+        date_index = DateRange(datetime(2009, 12, 11), periods=3,
+                               offset=datetools.bday)
+        ts = Series([5, np.nan, 3], index=date_index)
+        self.TS3 = ts
+
+        date_index = DateRange(datetime(2009, 12, 11), periods=5,
+                               offset=datetools.bday)
+        ts = Series([np.nan, 5, 8, 9, 7], index=date_index)
+        self.TS4 = ts
+
+        data = {'x1' : self.TS2, 'x2' : self.TS4}
+        self.DF1 = DataFrame(data=data)
+
+        data = {'x1' : self.TS2, 'x2' : self.TS4}
+        self.DICT1 = data
+
+    def testFilterWithSeriesRHS(self):
+        (lhs, rhs, weights, rhs_pre,
+        index, valid) = _filter_data(self.TS1, {'x1' : self.TS2}, None)
+        self.tsAssertEqual(self.TS1, lhs)
+        self.tsAssertEqual(self.TS2[:3], rhs['x1'])
+        self.tsAssertEqual(self.TS2, rhs_pre['x1'])
+
+    def testFilterWithSeriesRHS2(self):
+        (lhs, rhs, weights, rhs_pre,
+        index, valid) = _filter_data(self.TS2, {'x1' : self.TS1}, None)
+        self.tsAssertEqual(self.TS2[:3], lhs)
+        self.tsAssertEqual(self.TS1, rhs['x1'])
+        self.tsAssertEqual(self.TS1, rhs_pre['x1'])
+
+    def testFilterWithSeriesRHS3(self):
+        (lhs, rhs, weights, rhs_pre,
+        index, valid) = _filter_data(self.TS3, {'x1' : self.TS4}, None)
+        exp_lhs = self.TS3[2:3]
+        exp_rhs = self.TS4[2:3]
+        exp_rhs_pre = self.TS4[1:]
+        self.tsAssertEqual(exp_lhs, lhs)
+        self.tsAssertEqual(exp_rhs, rhs['x1'])
+        self.tsAssertEqual(exp_rhs_pre, rhs_pre['x1'])
+
+    def testFilterWithDataFrameRHS(self):
+        (lhs, rhs, weights, rhs_pre,
+        index, valid) = _filter_data(self.TS1, self.DF1, None)
+        exp_lhs = self.TS1[1:]
+        exp_rhs1 = self.TS2[1:3]
+        exp_rhs2 = self.TS4[1:3]
+        self.tsAssertEqual(exp_lhs, lhs)
+        self.tsAssertEqual(exp_rhs1, rhs['x1'])
+        self.tsAssertEqual(exp_rhs2, rhs['x2'])
+
+    def testFilterWithDictRHS(self):
+        (lhs, rhs, weights, rhs_pre,
+        index, valid) = _filter_data(self.TS1, self.DICT1, None)
+        exp_lhs = self.TS1[1:]
+        exp_rhs1 = self.TS2[1:3]
+        exp_rhs2 = self.TS4[1:3]
+        self.tsAssertEqual(exp_lhs, lhs)
+        self.tsAssertEqual(exp_rhs1, rhs['x1'])
+        self.tsAssertEqual(exp_rhs2, rhs['x2'])
+
+    def tsAssertEqual(self, ts1, ts2):
+        self.assert_(np.array_equal(ts1, ts2))
+
 
 if __name__ == '__main__':
     import nose

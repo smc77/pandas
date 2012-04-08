@@ -6,9 +6,8 @@ include TODO.rst
 include setup.py
 include setupegg.py
 
-graft docs
-prune docs/build
-prune docs/gh-pages
+graft doc
+prune doc/build
 
 graft examples
 graft pandas
@@ -18,6 +17,7 @@ global-exclude *.pyd
 global-exclude *.pyc
 global-exclude .git*
 global-exclude .DS_Store
+global-exclude *.png
 
 # include examples/data/*
 # recursive-include examples *.py

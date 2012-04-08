@@ -10,10 +10,12 @@ from StringIO import StringIO
 import numpy as np
 
 from pandas.core.api import DataFrame, Series
+from pandas.core.common import _ensure_float64
 from pandas.core.index import MultiIndex
-from pandas.core.panel import Panel, LongPanel
+from pandas.core.panel import Panel
 from pandas.util.decorators import cache_readonly
-import pandas.stats.common as common
+
+import pandas.stats.common as scom
 import pandas.stats.math as math
 import pandas.stats.moments as moments
 
@@ -32,41 +34,62 @@ class OLS(object):
     nw_lags: None or int
         Number of Newey-West lags.
     """
-    def __init__(self, y, x, intercept=True, nw_lags=None, nw_overlap=False):
-        import scikits.statsmodels.api as sm
+    _panel_model = False
+
+    def __init__(self, y, x, intercept=True, weights=None, nw_lags=None,
+                 nw_overlap=False):
+        try:
+            import statsmodels.api as sm
+        except ImportError:
+            import scikits.statsmodels.api as sm
+
         self._x_orig = x
         self._y_orig = y
+        self._weights_orig = weights
         self._intercept = intercept
         self._nw_lags = nw_lags
         self._nw_overlap = nw_overlap
 
-        (self._y, self._x, self._x_filtered,
+        (self._y, self._x, self._weights, self._x_filtered,
          self._index, self._time_has_obs) = self._prepare_data()
 
-        # for compat with PanelOLS
-        self._x_trans = self._x
-        self._y_trans = self._y
-
-        self._x_raw = self._x.values
-        self._y_raw = self._y.view(np.ndarray)
-
-        self.sm_ols = sm.OLS(self._y_raw, self._x.values).fit()
+        if self._weights is not None:
+            self._x_trans = self._x.mul(np.sqrt(self._weights), axis=0)
+            self._y_trans = self._y * np.sqrt(self._weights)
+            self.sm_ols = sm.WLS(self._y.values,
+                                 self._x.values,
+                                 weights=self._weights.values).fit()
+        else:
+            self._x_trans = self._x
+            self._y_trans = self._y
+            self.sm_ols = sm.OLS(self._y.values,
+                                 self._x.values).fit()
 
     def _prepare_data(self):
         """
-        Filters the data and sets up an intercept if necessary.
+        Cleans the input for single OLS.
+
+        Parameters
+        ----------
+        lhs: Series
+            Dependent variable in the regression.
+        rhs: dict, whose values are Series, DataFrame, or dict
+            Explanatory variables of the regression.
 
         Returns
         -------
-        (DataFrame, Series).
+        Series, DataFrame
+            Cleaned lhs and rhs
         """
-        (y, x, x_filtered,
-         union_index, valid) = _filter_data(self._y_orig, self._x_orig)
-
+        (filt_lhs, filt_rhs, filt_weights,
+         pre_filt_rhs, index, valid) = _filter_data(self._y_orig, self._x_orig,
+                                                    self._weights_orig)
         if self._intercept:
-            x['intercept'] = x_filtered['intercept'] = 1.
+            filt_rhs['intercept'] = 1.
+            pre_filt_rhs['intercept'] = 1.
 
-        return y, x, x_filtered, union_index, valid
+        return (filt_lhs, filt_rhs, filt_weights,
+                pre_filt_rhs, index, valid)
 
     @property
     def nobs(self):
@@ -74,7 +97,7 @@ class OLS(object):
 
     @property
     def _nobs(self):
-        return len(self._y_raw)
+        return len(self._y)
 
     @property
     def nw_lags(self):
@@ -169,7 +192,7 @@ class OLS(object):
     @cache_readonly
     def f_stat(self):
         """Returns the f-stat value."""
-        return common.f_stat_to_dict(self._f_stat_raw)
+        return f_stat_to_dict(self._f_stat_raw)
 
     def f_test(self, hypothesis):
         """Runs the F test, given a joint hypothesis.  The hypothesis is
@@ -224,7 +247,7 @@ class OLS(object):
         result = math.calc_F(R, r, self._beta_raw, self._var_beta_raw,
                              self._nobs, self.df)
 
-        return common.f_stat_to_dict(result)
+        return f_stat_to_dict(result)
 
     @cache_readonly
     def _p_value_raw(self):
@@ -242,11 +265,15 @@ class OLS(object):
     @cache_readonly
     def _r2_raw(self):
         """Returns the raw r-squared values."""
-        has_intercept = np.abs(self._resid_raw.sum()) < _FP_ERR
-        if self._intercept:
+        if self._use_centered_tss:
             return 1 - self.sm_ols.ssr / self.sm_ols.centered_tss
         else:
             return 1 - self.sm_ols.ssr / self.sm_ols.uncentered_tss
+
+    @property
+    def _use_centered_tss(self):
+        # has_intercept = np.abs(self._resid_raw.sum()) < _FP_ERR
+        return self._intercept
 
     @cache_readonly
     def r2(self):
@@ -309,7 +336,7 @@ class OLS(object):
         Returns the raw covariance of beta.
         """
         x = self._x.values
-        y = self._y_raw
+        y = self._y.values
 
         xx = np.dot(x.T, x)
 
@@ -372,7 +399,7 @@ class OLS(object):
         buf.write('%14s %10s %10s %10s %10s %10s %10s\n' %
                   ('Variable', 'Coef', 'Std Err', 't-stat',
                    'p-value', 'CI 2.5%', 'CI 97.5%'))
-        buf.write(common.banner(''))
+        buf.write(scom.banner(''))
         coef_template = '\n%14s %10.4f %10.4f %10.2f %10.4f %10.4f %10.4f'
 
         results = self._results
@@ -381,7 +408,7 @@ class OLS(object):
 
         for i, name in enumerate(beta.index):
             if i and not (i % 5):
-                buf.write('\n' + common.banner(''))
+                buf.write('\n' + scom.banner(''))
 
             std_err = results['std_err'][name]
             CI1 = beta[name] - 1.96 * std_err
@@ -461,9 +488,9 @@ Degrees of Freedom: model %(df_model)d, resid %(df_resid)d
             formula.write(' + ' + coef)
 
         params = {
-            'bannerTop' : common.banner('Summary of Regression Analysis'),
-            'bannerCoef' : common.banner('Summary of Estimated Coefficients'),
-            'bannerEnd' : common.banner('End of Summary'),
+            'bannerTop' : scom.banner('Summary of Regression Analysis'),
+            'bannerCoef' : scom.banner('Summary of Estimated Coefficients'),
+            'bannerEnd' : scom.banner('End of Summary'),
             'formula' : formula.getvalue(),
             'r2' : results['r2'],
             'r2_adj' : results['r2_adj'],
@@ -506,24 +533,24 @@ class MovingOLS(OLS):
         True if you want an intercept.
     nw_lags: None or int
         Number of Newey-West lags.
-    window_type: int
-        FULL_SAMPLE, ROLLING, EXPANDING.  FULL_SAMPLE by default.
+    window_type: {'full sample', 'rolling', 'expanding'}
+        Default expanding
     window: int
         size of window (for rolling/expanding OLS)
     """
-    def __init__(self, y, x, window_type='expanding',
+    def __init__(self, y, x, weights=None, window_type='expanding',
                  window=None, min_periods=None, intercept=True,
                  nw_lags=None, nw_overlap=False):
 
         self._args = dict(intercept=intercept, nw_lags=nw_lags,
                           nw_overlap=nw_overlap)
 
-        OLS.__init__(self, y=y, x=x, **self._args)
+        OLS.__init__(self, y=y, x=x, weights=weights, **self._args)
 
         self._set_window(window_type, window, min_periods)
 
     def _set_window(self, window_type, window, min_periods):
-        self._window_type = common._get_window_type(window_type)
+        self._window_type = scom._get_window_type(window_type)
 
         if self._is_rolling:
             assert(window is not None)
@@ -569,7 +596,7 @@ class MovingOLS(OLS):
     @cache_readonly
     def f_stat(self):
         """Returns the f-stat value."""
-        f_stat_dicts = dict((date, common.f_stat_to_dict(f_stat))
+        f_stat_dicts = dict((date, f_stat_to_dict(f_stat))
                             for date, f_stat in zip(self.beta.index,
                                                     self._f_stat_raw))
 
@@ -657,7 +684,7 @@ class MovingOLS(OLS):
 
     @property
     def _is_rolling(self):
-        return self._window_type == common.ROLLING
+        return self._window_type == 'rolling'
 
     @cache_readonly
     def _beta_raw(self):
@@ -738,13 +765,14 @@ class MovingOLS(OLS):
         cum_xx = []
 
         slicer = lambda df, dt: df.truncate(dt, dt).values
-        if isinstance(x, DataFrame) and not isinstance(x, LongPanel):
+        if not self._panel_model:
             _get_index = x.index.get_loc
             def slicer(df, dt):
                 i = _get_index(dt)
                 return df.values[i:i+1, :]
 
         last = np.zeros((K, K))
+
         for i, date in enumerate(dates):
             if not valid[i]:
                 cum_xx.append(last)
@@ -762,7 +790,7 @@ class MovingOLS(OLS):
         cum_xy = []
 
         x_slicer = lambda df, dt: df.truncate(dt, dt).values
-        if isinstance(x, DataFrame) and not isinstance(x, LongPanel):
+        if not self._panel_model:
             _get_index = x.index.get_loc
             def x_slicer(df, dt):
                 i = _get_index(dt)
@@ -876,8 +904,8 @@ class MovingOLS(OLS):
         sst = []
         sse = []
 
-        Y = self._y
-        X = self._x
+        Y = self._y_trans
+        X = self._x_trans
 
         dates = self._index
         window = self._window
@@ -918,7 +946,7 @@ class MovingOLS(OLS):
     def _r2_raw(self):
         rs = self._resid_stats
 
-        if self._intercept:
+        if self._use_centered_tss:
             return 1 - rs['sse'] / rs['centered_tss']
         else:
             return 1 - rs['sse'] / rs['uncentered_tss']
@@ -933,7 +961,7 @@ class MovingOLS(OLS):
     @cache_readonly
     def _resid_raw(self):
         """Returns the raw residuals."""
-        return (self._y_raw - self._y_fitted_raw)
+        return (self._y.values - self._y_fitted_raw)
 
     @cache_readonly
     def _std_err_raw(self):
@@ -952,8 +980,8 @@ class MovingOLS(OLS):
     @cache_readonly
     def _var_beta_raw(self):
         """Returns the raw covariance of beta."""
-        x = self._x
-        y = self._y
+        x = self._x_trans
+        y = self._y_trans
         dates = self._index
         nobs = self._nobs
         rmse = self._rmse_raw
@@ -1092,10 +1120,13 @@ class MovingOLS(OLS):
     def _beta_matrix(self, lag=0):
         assert(lag >= 0)
 
+        betas = self._beta_raw
+
         labels = np.arange(len(self._y)) - lag
         indexer = self._valid_obs_labels.searchsorted(labels, side='left')
+        indexer[indexer == len(betas)] = len(betas) - 1
 
-        beta_matrix = self._beta_raw[indexer]
+        beta_matrix = betas[indexer]
         beta_matrix[labels < self._valid_obs_labels[0]] = np.NaN
 
         return beta_matrix
@@ -1129,6 +1160,50 @@ def _safe_update(d, other):
 
         d[k] = v
 
+def _filter_data(lhs, rhs, weights=None):
+    """
+    Cleans the input for single OLS.
+
+    Parameters
+    ----------
+    lhs: Series
+        Dependent variable in the regression.
+    rhs: dict, whose values are Series, DataFrame, or dict
+        Explanatory variables of the regression.
+
+    Returns
+    -------
+    Series, DataFrame
+        Cleaned lhs and rhs
+    """
+    if not isinstance(lhs, Series):
+        assert(len(lhs) == len(rhs))
+        lhs = Series(lhs, index=rhs.index)
+
+    rhs = _combine_rhs(rhs)
+    lhs = DataFrame({'__y__' : lhs}, dtype=float)
+    pre_filt_rhs = rhs.dropna(how='any')
+
+    combined = rhs.join(lhs, how='outer')
+    if weights is not None:
+        combined['__weights__'] = weights
+
+    valid = (combined.count(1) == len(combined.columns)).values
+    index = combined.index
+    combined = combined[valid]
+
+    if weights is not None:
+        filt_weights = combined.pop('__weights__')
+    else:
+        filt_weights = None
+
+    filt_lhs = combined.pop('__y__')
+    filt_rhs = combined
+
+    return (filt_lhs, filt_rhs, filt_weights,
+            pre_filt_rhs, index, valid)
+
+
 def _combine_rhs(rhs):
     """
     Glue input X variables together while checking for potential
@@ -1152,57 +1227,9 @@ def _combine_rhs(rhs):
         raise Exception('Invalid RHS type: %s' % type(rhs))
 
     if not isinstance(series, DataFrame):
-        series = DataFrame(series)
+        series = DataFrame(series, dtype=float)
 
     return series
-
-def _filter_data(lhs, rhs):
-    """
-    Cleans the input for single OLS.
-
-    Parameters
-    ----------
-    lhs: Series
-        Dependent variable in the regression.
-    rhs: dict, whose values are Series, DataFrame, or dict
-        Explanatory variables of the regression.
-
-    Returns
-    -------
-    Series, DataFrame
-        Cleaned lhs and rhs
-    """
-    if not isinstance(lhs, Series):
-        assert(len(lhs) == len(rhs))
-        lhs = Series(lhs, index=rhs.index)
-
-    rhs = _combine_rhs(rhs)
-
-    rhs_valid = np.isfinite(rhs.values).sum(1) == len(rhs.columns)
-
-    if not rhs_valid.all():
-        pre_filtered_rhs = rhs[rhs_valid]
-    else:
-        pre_filtered_rhs = rhs
-
-    index = lhs.index + rhs.index
-    if not index.equals(rhs.index) or not index.equals(lhs.index):
-        rhs = rhs.reindex(index)
-        lhs = lhs.reindex(index)
-
-        rhs_valid = np.isfinite(rhs.values).sum(1) == len(rhs.columns)
-
-    lhs_valid = np.isfinite(lhs.values)
-    valid = rhs_valid & lhs_valid
-
-    if not valid.all():
-        filt_index = rhs.index[valid]
-        filtered_rhs = rhs.reindex(filt_index)
-        filtered_lhs = lhs.reindex(filt_index)
-    else:
-        filtered_rhs, filtered_lhs = rhs, lhs
-
-    return filtered_lhs, filtered_rhs, pre_filtered_rhs, index, valid
 
 # A little kludge so we can use this method for both
 # MovingOLS and MovingPanelOLS
@@ -1212,3 +1239,16 @@ def _y_converter(y):
         return np.array([y])
     else:
         return y
+
+
+def f_stat_to_dict(result):
+    f_stat, shape, p_value = result
+
+    result = {}
+    result['f-stat'] = f_stat
+    result['DF X'] = shape[0]
+    result['DF Resid'] = shape[1]
+    result['p-value'] = p_value
+
+    return result
+

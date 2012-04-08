@@ -1,18 +1,26 @@
+from __future__ import with_statement
+
 import nose
 import unittest
 import os
 import sys
 
+from datetime import datetime
 import numpy as np
 
-from pandas import (Series, DataFrame, Panel, LongPanel, DateRange)
-from pandas.io.pytables import HDFStore
+from pandas import Series, DataFrame, Panel, DateRange, MultiIndex
+from pandas.io.pytables import HDFStore, get_store
 import pandas.util.testing as tm
 
 try:
     import tables
 except ImportError:
     raise nose.SkipTest('no pytables')
+
+from distutils.version import LooseVersion
+
+_default_compressor = LooseVersion(tables.__version__) >= '2.2' \
+                      and 'blosc' or 'zlib'
 
 class TesttHDFStore(unittest.TestCase):
     path = '__test__.h5'
@@ -25,12 +33,29 @@ class TesttHDFStore(unittest.TestCase):
         self.store.close()
         os.remove(self.path)
 
-    def test_len(self):
+    def test_factory_fun(self):
+        try:
+            with get_store(self.scratchpath) as tbl:
+                raise ValueError('blah')
+        except ValueError:
+            pass
+
+        with get_store(self.scratchpath) as tbl:
+            tbl['a'] = tm.makeDataFrame()
+
+        with get_store(self.scratchpath) as tbl:
+            self.assertEquals(len(tbl), 1)
+            self.assertEquals(type(tbl['a']), DataFrame)
+
+        os.remove(self.scratchpath)
+
+    def test_len_keys(self):
         self.store['a'] = tm.makeTimeSeries()
         self.store['b'] = tm.makeStringSeries()
         self.store['c'] = tm.makeDataFrame()
         self.store['d'] = tm.makePanel()
         self.assertEquals(len(self.store), 4)
+        self.assert_(set(self.store.keys()) == set(['a', 'b', 'c', 'd']))
 
     def test_repr(self):
         repr(self.store)
@@ -81,15 +106,24 @@ class TesttHDFStore(unittest.TestCase):
 
     def test_put_compression(self):
         df = tm.makeTimeDataFrame()
-        self.store.put('c', df, table=True, compression='blosc')
-        tm.assert_frame_equal(self.store['c'], df)
 
         self.store.put('c', df, table=True, compression='zlib')
         tm.assert_frame_equal(self.store['c'], df)
 
         # can't compress if table=False
         self.assertRaises(ValueError, self.store.put, 'b', df,
+                          table=False, compression='zlib')
+
+    def test_put_compression_blosc(self):
+        tm.skip_if_no_package('tables', '2.2', app='blosc support')
+        df = tm.makeTimeDataFrame()
+
+        # can't compress if table=False
+        self.assertRaises(ValueError, self.store.put, 'b', df,
                           table=False, compression='blosc')
+
+        self.store.put('c', df, table=True, compression='blosc')
+        tm.assert_frame_equal(self.store['c'], df)
 
     def test_put_integer(self):
         # non-date, non-string index
@@ -102,6 +136,15 @@ class TesttHDFStore(unittest.TestCase):
         self.store.append('c', df[10:])
         tm.assert_frame_equal(self.store['c'], df)
 
+    def test_append_diff_item_order(self):
+        wp = tm.makePanel()
+        wp1 = wp.ix[:, :10, :]
+        wp2 = wp.ix[['ItemC', 'ItemB', 'ItemA'], 10:, :]
+
+        self.store.put('panel', wp1, table=True)
+        self.assertRaises(Exception, self.store.put, 'panel', wp2,
+                          append=True)
+
     def test_remove(self):
         ts = tm.makeTimeSeries()
         df = tm.makeDataFrame()
@@ -113,6 +156,14 @@ class TesttHDFStore(unittest.TestCase):
 
         self.store.remove('b')
         self.assertEquals(len(self.store), 0)
+
+    def test_remove_where_not_exist(self):
+        crit1 = {
+            'field' : 'index',
+            'op' : '>',
+            'value' : 'foo'
+        }
+        self.store.remove('a', where=[crit1])
 
     def test_remove_crit(self):
         wp = tm.makePanel()
@@ -141,13 +192,30 @@ class TesttHDFStore(unittest.TestCase):
         ts = tm.makeTimeSeries()
         self._check_roundtrip(ts, tm.assert_series_equal)
 
+    def test_float_index(self):
+        # GH #454
+        index = np.random.randn(10)
+        s = Series(np.random.randn(10), index=index)
+        self._check_roundtrip(s, tm.assert_series_equal)
+
+    def test_tuple_index(self):
+        # GH #492
+        col = np.arange(10)
+        idx = [(0.,1.), (2., 3.), (4., 5.)]
+        data = np.random.randn(30).reshape((3, 10))
+        DF = DataFrame(data, index=idx, columns=col)
+        self._check_roundtrip(DF, tm.assert_frame_equal)
+
     def test_timeseries_preepoch(self):
         if sys.version_info[0] == 2 and sys.version_info[1] < 7:
             raise nose.SkipTest
 
         dr = DateRange('1/1/1940', '1/1/1960')
         ts = Series(np.random.randn(len(dr)), index=dr)
-        self._check_roundtrip(ts, tm.assert_series_equal)
+        try:
+            self._check_roundtrip(ts, tm.assert_series_equal)
+        except OverflowError:
+            raise nose.SkipTest('known failer on some windows platforms')
 
     def test_frame(self):
         df = tm.makeDataFrame()
@@ -174,6 +242,63 @@ class TesttHDFStore(unittest.TestCase):
         self.store['df'] = df
         recons = self.store['df']
         self.assert_(recons._data.is_consolidated())
+
+        # empty
+        self.assertRaises(ValueError, self._check_roundtrip, df[:0],
+                          tm.assert_frame_equal)
+
+    def test_can_serialize_dates(self):
+        rng = [x.date() for x in DateRange('1/1/2000', '1/30/2000')]
+        frame = DataFrame(np.random.randn(len(rng), 4), index=rng)
+        self._check_roundtrip(frame, tm.assert_frame_equal)
+
+    def test_store_hierarchical(self):
+        index = MultiIndex(levels=[['foo', 'bar', 'baz', 'qux'],
+                                   ['one', 'two', 'three']],
+                           labels=[[0, 0, 0, 1, 1, 2, 2, 3, 3, 3],
+                                   [0, 1, 2, 0, 1, 1, 2, 0, 1, 2]],
+                           names=['foo', 'bar'])
+        frame = DataFrame(np.random.randn(10, 3), index=index,
+                          columns=['A', 'B', 'C'])
+
+        self._check_roundtrip(frame, tm.assert_frame_equal)
+        self._check_roundtrip(frame.T, tm.assert_frame_equal)
+        self._check_roundtrip(frame['A'], tm.assert_series_equal)
+
+        # check that the names are stored
+        try:
+            store = HDFStore(self.scratchpath)
+            store['frame'] = frame
+            recons = store['frame']
+            assert(recons.index.names == ['foo', 'bar'])
+        finally:
+            store.close()
+            os.remove(self.scratchpath)
+
+    def test_store_index_name(self):
+        df = tm.makeDataFrame()
+        df.index.name = 'foo'
+        try:
+            store = HDFStore(self.scratchpath)
+            store['frame'] = df
+            recons = store['frame']
+            assert(recons.index.name == 'foo')
+        finally:
+            store.close()
+            os.remove(self.scratchpath)
+
+    def test_store_series_name(self):
+        df = tm.makeDataFrame()
+        series = df['A']
+
+        try:
+            store = HDFStore(self.scratchpath)
+            store['series'] = series
+            recons = store['series']
+            assert(recons.name == 'A')
+        finally:
+            store.close()
+            os.remove(self.scratchpath)
 
     def test_store_mixed(self):
         def _make_one():
@@ -224,13 +349,29 @@ class TesttHDFStore(unittest.TestCase):
         wp = tm.makePanel()
         self._check_roundtrip_table(wp, tm.assert_panel_equal)
 
+    def test_wide_table_dups(self):
+        wp = tm.makePanel()
+        try:
+            store = HDFStore(self.scratchpath)
+            store._quiet = True
+            store.put('panel', wp, table=True)
+            store.put('panel', wp, table=True, append=True)
+            recons = store['panel']
+            tm.assert_panel_equal(recons, wp)
+        finally:
+            store.close()
+            os.remove(self.scratchpath)
+
     def test_long(self):
         def _check(left, right):
-            tm.assert_panel_equal(left.to_wide(),
-                                  right.to_wide())
+            tm.assert_panel_equal(left.to_panel(), right.to_panel())
 
         wp = tm.makePanel()
-        self._check_roundtrip(wp.to_long(), _check)
+        self._check_roundtrip(wp.to_frame(), _check)
+
+        # empty
+        self.assertRaises(ValueError, self._check_roundtrip, wp.to_frame()[:0],
+                          _check)
 
     def test_longpanel(self):
         pass
@@ -309,7 +450,7 @@ class TesttHDFStore(unittest.TestCase):
     def _check_roundtrip(self, obj, comparator, compression=False):
         options = {}
         if compression:
-            options['complib'] = 'blosc'
+            options['complib'] = _default_compressor
 
         store = HDFStore(self.scratchpath, 'w', **options)
         try:
@@ -323,7 +464,7 @@ class TesttHDFStore(unittest.TestCase):
     def _check_roundtrip_table(self, obj, comparator, compression=False):
         options = {}
         if compression:
-            options['complib'] = 'blosc'
+            options['complib'] = _default_compressor
 
         store = HDFStore(self.scratchpath, 'w', **options)
         try:
@@ -343,6 +484,14 @@ class TesttHDFStore(unittest.TestCase):
         store['c']
         store['d']
         store.close()
+
+    def test_store_datetime_fractional_secs(self):
+        dt = datetime(2012, 1, 2, 3, 4, 5, 123456)
+        series = Series([0], [dt])
+        self.store['a'] = series
+        self.assertEquals(self.store['a'].index[0], dt)
+
+
 
 def curpath():
     pth, _ = os.path.split(os.path.abspath(__file__))

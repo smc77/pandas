@@ -47,7 +47,7 @@ Here are just a few of the things that pandas does well:
 Where to get it
 ===============
 
-The source code is currently hosted on GitHub at: http://github.com/wesm/pandas
+The source code is currently hosted on GitHub at: http://github.com/pydata/pandas
 
 Binary installers for the latest released version are available at the Python
 package index::
@@ -58,6 +58,26 @@ And via ``easy_install`` or ``pip``::
 
     easy_install pandas
     pip install pandas
+
+Dependencies
+============
+
+  * `NumPy <http://www.numpy.org>`__: 1.6.1 or higher. Older versions will work
+    but may not pass all of the unit tests. Bare minimum is NumPy 1.4.0.
+  * `python-dateutil <http://labix.org/python-dateutil>`__ 1.5
+
+Optional dependencies
+~~~~~~~~~~~~~~~~~~~~~
+
+  * `Cython <http://www.cython.org>`__: Only necessary to build development
+    version
+  * `SciPy <http://www.scipy.org>`__: miscellaneous statistical functions
+  * `PyTables <http://www.pytables.org>`__: necessary for HDF5-based storage
+  * `matplotlib <http://matplotlib.sourceforge.net/>`__: for plotting
+  * `scikits.statsmodels <http://statsmodels.sourceforge.net/>`__
+     * Needed for parts of :mod:`pandas.stats`
+  * `pytz <http://pytz.sourceforge.net/>`__
+     * Needed for time zone support with ``DateRange``
 
 Installation from sources
 =========================
@@ -71,7 +91,7 @@ On Windows, you will need to install MinGW and execute::
     python setup.py build --compiler=mingw32
     python setup.py install
 
-See http://pandas.sourceforge.net/ for more information.
+See http://pandas.pydata.org/ for more information.
 
 License
 =======
@@ -81,7 +101,7 @@ BSD
 Documentation
 =============
 
-The official documentation is hosted on SourceForge: http://pandas.sourceforge.net/
+The official documentation is hosted on PyData.org: http://pandas.pydata.org/
 
 The Sphinx documentation should provide a good starting point for learning how
 to use the library. Expect the docs to continue to expand as time goes on.
@@ -104,4 +124,3 @@ the pystatsmodels mailing list / Google group, where
 http://groups.google.com/group/pystatsmodels
 
   .. _NumPy: http://numpy.scipy.org/
-  .. _downloaded there: https://github.com/wesm/pandas/archives/master

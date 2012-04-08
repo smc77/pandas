@@ -10,69 +10,30 @@ import warnings
 
 import numpy as np
 
-from pandas.core.panel import Panel, LongPanel
+from pandas.core.panel import Panel
 from pandas.core.frame import DataFrame
 from pandas.core.series import Series
 from pandas.core.sparse import SparsePanel
 from pandas.stats.ols import OLS, MovingOLS
-import pandas.stats.common as common
+import pandas.stats.common as com
 import pandas.stats.math as math
 from pandas.util.decorators import cache_readonly
 
 class PanelOLS(OLS):
     """Implements panel OLS.
 
-    Parameters
-    ----------
-    y : DataFrame
-    x : Dict of DataFrame or Panel
-    intercept : bool
-        True if you want an intercept.  True by default.
-    nw_lags : None or int
-        Number of Newey-West lags.  None by default.
-    nw_overlap : bool
-        Whether there are overlaps in the NW lags.  Defaults to False.
-    window_type : int
-        FULL_SAMPLE, ROLLING, EXPANDING.  FULL_SAMPLE by default.
-    window : int
-        size of window (for rolling/expanding OLS)
-    weights : DataFrame
-        Weight for each observation.  The weights are not normalized;
-        they're multiplied directly by each observation.
-    pool : bool, default True
-        Whether to run pooled panel regression
-    entity_effects : bool, deafult False
-        Whether to account for entity fixed effects
-    time_effects : bool, default False
-        Whether to account for time fixed effects
-    x_effects : list, default None
-        List of x's to account for fixed effects
-    dropped_dummies : dict
-        Key is the name of the variable for the fixed effect.
-        Value is the value of that variable for which we drop the dummy.
-
-        For entity fixed effects, key equals 'entity', e.g. {'entity' : 'US'}
-
-        By default, the first item is dropped if one is not specified.
-    cluster : int
-        ENTITY or TIME, indicating entity/time clustering
-        A cluster is a grouping within which observations are correlated.
-
-        For example, if you have a panel data with countries over time and you
-        suspect that:
-
-        1. Countries are correlated - use 'time'
-        2. There is autocorrelation - use 'entity'
-
+    See ols function docs
     """
-    def __init__(self, y, x, weights=None,
-                 intercept=True, nw_lags=None, entity_effects=False,
-                 time_effects=False, x_effects=None, cluster=None,
-                 dropped_dummies=None, verbose=False, nw_overlap=False):
+    _panel_model = True
+
+    def __init__(self, y, x, weights=None, intercept=True, nw_lags=None,
+                 entity_effects=False, time_effects=False, x_effects=None,
+                 cluster=None, dropped_dummies=None, verbose=False,
+                 nw_overlap=False):
         self._x_orig = x
         self._y_orig = y
-
         self._weights = weights
+
         self._intercept = intercept
         self._nw_lags = nw_lags
         self._nw_overlap = nw_overlap
@@ -80,17 +41,14 @@ class PanelOLS(OLS):
         self._time_effects = time_effects
         self._x_effects = x_effects
         self._dropped_dummies = dropped_dummies or {}
-        self._cluster = common._get_cluster_type(cluster)
+        self._cluster = com._get_cluster_type(cluster)
         self._verbose = verbose
 
         (self._x, self._x_trans,
          self._x_filtered, self._y,
          self._y_trans) = self._prepare_data()
 
-        self._x_trans_raw = self._x_trans.values
-        self._y_trans_raw = self._y_trans.values.squeeze()
-
-        self._index = self._x.major_axis
+        self._index = self._x.index.levels[0]
 
         self._T = len(self._index)
 
@@ -99,7 +57,7 @@ class PanelOLS(OLS):
             print msg
 
     def _prepare_data(self):
-        """Cleans and converts input data into LongPanel classes.
+        """Cleans and stacks input data into DataFrame objects
 
         If time effects is True, then we turn off intercepts and omit an item
         from every (entity and x) fixed effect.
@@ -110,8 +68,7 @@ class PanelOLS(OLS):
 
         The categorical variables will get dropped from x.
         """
-        (x, x_filtered, y, weights,
-         weights_filt, cat_mapping) = self._filter_data()
+        (x, x_filtered, y, weights, cat_mapping) = self._filter_data()
 
         self.log('Adding dummies to X variables')
         x = self._add_dummies(x, cat_mapping)
@@ -120,11 +77,11 @@ class PanelOLS(OLS):
         x_filtered = self._add_dummies(x_filtered, cat_mapping)
 
         if self._x_effects:
-            x = x.filter(x.items - self._x_effects)
-            x_filtered = x_filtered.filter(x_filtered.items - self._x_effects)
+            x = x.drop(self._x_effects, axis=1)
+            x_filtered = x_filtered.drop(self._x_effects, axis=1)
 
         if self._time_effects:
-            x_regressor = x.subtract(x.mean('minor', broadcast=True))
+            x_regressor = x.sub(x.mean(level=0), level=0)
 
             unstacked_y = y.unstack()
             y_regressor = unstacked_y.sub(unstacked_y.mean(1), axis=0).stack()
@@ -142,10 +99,12 @@ class PanelOLS(OLS):
             y_regressor = y
 
         if weights is not None:
-            assert(y_regressor.index is weights.index)
-            assert(x_regressor.index is weights.index)
-            y_regressor = y_regressor * weights
-            x_regressor = x_regressor.mul(weights, axis=0)
+            assert(y_regressor.index.equals(weights.index))
+            assert(x_regressor.index.equals(weights.index))
+
+            rt_weights = np.sqrt(weights)
+            y_regressor = y_regressor * rt_weights
+            x_regressor = x_regressor.mul(rt_weights, axis=0)
 
         return x, x_regressor, x_filtered, y, y_regressor
 
@@ -156,8 +115,8 @@ class PanelOLS(OLS):
         data = self._x_orig
         cat_mapping = {}
 
-        if isinstance(data, LongPanel):
-            data = data.to_wide()
+        if isinstance(data, DataFrame):
+            data = data.to_panel()
         else:
             if isinstance(data, Panel):
                 data = data.copy()
@@ -174,9 +133,9 @@ class PanelOLS(OLS):
             data['__weights__'] = self._weights
 
         # Filter x's without y (so we can make a prediction)
-        filtered = data.to_long()
+        filtered = data.to_frame()
 
-        # Filter all data together using to_long
+        # Filter all data together using to_frame
 
         # convert to DataFrame
         y = self._y_orig
@@ -184,15 +143,9 @@ class PanelOLS(OLS):
             y = y.unstack()
 
         data['__y__'] = y
-        data_long = data.to_long()
+        data_long = data.to_frame()
 
         x_filt = filtered.filter(x_names)
-
-        if self._weights:
-            weights_filt = filtered['__weights__']
-        else:
-            weights_filt = None
-
         x = data_long.filter(x_names)
         y = data_long['__y__']
 
@@ -201,28 +154,33 @@ class PanelOLS(OLS):
         else:
             weights = None
 
-        return x, x_filt, y, weights, weights_filt, cat_mapping
+        return x, x_filt, y, weights, cat_mapping
 
     def _convert_x(self, x):
-
         # Converts non-numeric data in x to floats. x_converted is the
         # DataFrame with converted values, and x_conversion is a dict that
         # provides the reverse mapping.  For example, if 'A' was converted to 0
         # for x named 'variety', then x_conversion['variety'][0] is 'A'.
         x_converted = {}
         cat_mapping = {}
-        for key, df in x.iteritems():
+        # x can be either a dict or a Panel, but in Python 3, dicts don't have
+        # .iteritems
+        iteritems = getattr(x, 'iteritems', x.items)
+        for key, df in iteritems():
             assert(isinstance(df, DataFrame))
 
             if _is_numeric(df):
                 x_converted[key] = df
             else:
-                values = df.values
-                distinct_values = sorted(set(values.flat))
-                cat_mapping[key] = dict(enumerate(distinct_values))
-                new_values = np.searchsorted(distinct_values, values)
-                x_converted[key] = DataFrame(new_values, index=df.index,
-                                              columns=df.columns)
+                try:
+                    df = df.astype(float)
+                except (TypeError, ValueError):
+                    values = df.values
+                    distinct_values = sorted(set(values.flat))
+                    cat_mapping[key] = dict(enumerate(distinct_values))
+                    new_values = np.searchsorted(distinct_values, values)
+                    x_converted[key] = DataFrame(new_values, index=df.index,
+                                                  columns=df.columns)
 
         if len(cat_mapping) == 0:
             x_converted = x
@@ -231,11 +189,11 @@ class PanelOLS(OLS):
 
     def _add_dummies(self, panel, mapping):
         """
-        Add entity and / or categorical dummies to input X LongPanel
+        Add entity and / or categorical dummies to input X DataFrame
 
         Returns
         -------
-        LongPanel
+        DataFrame
         """
         panel = self._add_entity_effects(panel)
         panel = self._add_categorical_dummies(panel, mapping)
@@ -248,30 +206,32 @@ class PanelOLS(OLS):
 
         Returns
         -------
-        LongPanel
+        DataFrame
         """
+        from pandas.core.reshape import make_axis_dummies
+
         if not self._entity_effects:
             return panel
 
         self.log('-- Adding entity fixed effect dummies')
 
-        dummies = panel.get_axis_dummies(axis='minor')
+        dummies = make_axis_dummies(panel, 'minor')
 
         if not self._use_all_dummies:
             if 'entity' in self._dropped_dummies:
                 to_exclude = str(self._dropped_dummies.get('entity'))
             else:
-                to_exclude = dummies.items[0]
+                to_exclude = dummies.columns[0]
 
-            if to_exclude not in dummies.items:
+            if to_exclude not in dummies.columns:
                 raise Exception('%s not in %s' % (to_exclude,
-                                                  dummies.items))
+                                                  dummies.columns))
 
             self.log('-- Excluding dummy for entity: %s' % to_exclude)
 
-            dummies = dummies.filter(dummies.items - [to_exclude])
+            dummies = dummies.filter(dummies.columns - [to_exclude])
 
-        dummies = dummies.addPrefix('FE_')
+        dummies = dummies.add_prefix('FE_')
         panel = panel.join(dummies)
 
         return panel
@@ -282,8 +242,10 @@ class PanelOLS(OLS):
 
         Returns
         -------
-        LongPanel
+        DataFrame
         """
+        from pandas.core.reshape import make_column_dummies
+
         if not self._x_effects:
             return panel
 
@@ -292,7 +254,7 @@ class PanelOLS(OLS):
         for effect in self._x_effects:
             self.log('-- Adding fixed effect dummies for %s' % effect)
 
-            dummies = panel.get_dummies(effect)
+            dummies = make_column_dummies(panel, effect, prefix=False)
 
             val_map = cat_mappings.get(effect)
             if val_map:
@@ -305,19 +267,19 @@ class PanelOLS(OLS):
                     if val_map:
                         mapped_name = val_map[to_exclude]
                 else:
-                    to_exclude = mapped_name = dummies.items[0]
+                    to_exclude = mapped_name = dummies.columns[0]
 
-                if mapped_name not in dummies.items: # pragma: no cover
+                if mapped_name not in dummies.columns: # pragma: no cover
                     raise Exception('%s not in %s' % (to_exclude,
-                                                      dummies.items))
+                                                      dummies.columns))
 
                 self.log('-- Excluding dummy for %s: %s' % (effect, to_exclude))
 
-                dummies = dummies.filter(dummies.items - [mapped_name])
+                dummies = dummies.filter(dummies.columns - [mapped_name])
                 dropped_dummy = True
 
             dummies = _convertDummies(dummies, cat_mappings.get(effect))
-            dummies = dummies.addPrefix('%s_' % effect)
+            dummies = dummies.add_prefix('%s_' % effect)
             panel = panel.join(dummies)
 
         return panel
@@ -334,8 +296,8 @@ class PanelOLS(OLS):
     @cache_readonly
     def _beta_raw(self):
         """Runs the regression and returns the beta."""
-        X = self._x_trans_raw
-        Y = self._y_trans_raw
+        X = self._x_trans.values
+        Y = self._y_trans.values.squeeze()
 
         beta, _, _, _ = np.linalg.lstsq(X, Y)
 
@@ -343,7 +305,7 @@ class PanelOLS(OLS):
 
     @cache_readonly
     def beta(self):
-        return Series(self._beta_raw, index=self._x.items)
+        return Series(self._beta_raw, index=self._x.columns)
 
     @cache_readonly
     def _df_model_raw(self):
@@ -358,7 +320,7 @@ class PanelOLS(OLS):
     @cache_readonly
     def _df_raw(self):
         """Returns the degrees of freedom."""
-        df = math.rank(self._x_trans_raw)
+        df = math.rank(self._x_trans.values)
         if self._time_effects:
             df += self._total_times
 
@@ -366,15 +328,24 @@ class PanelOLS(OLS):
 
     @cache_readonly
     def _r2_raw(self):
-        Y = self._y.values.squeeze()
-        X = self._x.values
+        Y = self._y_trans.values.squeeze()
+        X = self._x_trans.values
 
         resid = Y - np.dot(X, self._beta_raw)
 
         SSE = (resid ** 2).sum()
-        SST = ((Y - np.mean(Y)) ** 2).sum()
+
+        if self._use_centered_tss:
+            SST = ((Y - np.mean(Y)) ** 2).sum()
+        else:
+            SST = (Y**2).sum()
 
         return 1 - SSE / SST
+
+    @property
+    def _use_centered_tss(self):
+        # has_intercept = np.abs(self._resid_raw.sum()) < _FP_ERR
+        return self._intercept or self._entity_effects or self._time_effects
 
     @cache_readonly
     def _r2_adj_raw(self):
@@ -396,8 +367,11 @@ class PanelOLS(OLS):
     @cache_readonly
     def _rmse_raw(self):
         """Returns the raw rmse values."""
-        X = self._x.values
-        Y = self._y.values.squeeze()
+        # X = self._x.values
+        # Y = self._y.values.squeeze()
+
+        X = self._x_trans.values
+        Y = self._y_trans.values.squeeze()
 
         resid = Y - np.dot(X, self._beta_raw)
         ss = (resid ** 2).sum()
@@ -406,9 +380,9 @@ class PanelOLS(OLS):
     @cache_readonly
     def _var_beta_raw(self):
         cluster_axis = None
-        if self._cluster == common.TIME:
+        if self._cluster == 'time':
             cluster_axis = 0
-        elif self._cluster == common.ENTITY:
+        elif self._cluster == 'entity':
             cluster_axis = 1
 
         x = self._x
@@ -426,20 +400,17 @@ class PanelOLS(OLS):
     @cache_readonly
     def _y_fitted_raw(self):
         """Returns the raw fitted y values."""
-        return np.dot(self._x_filtered.values, self._beta_raw)
+        return np.dot(self._x.values, self._beta_raw)
 
     @cache_readonly
     def y_fitted(self):
-        return self._unstack_vector(self._y_fitted_raw,
-                                    index=self._x_filtered.index)
+        return self._unstack_vector(self._y_fitted_raw, index=self._x.index)
 
     def _unstack_vector(self, vec, index=None):
         if index is None:
             index = self._y_trans.index
-        panel = LongPanel(vec.reshape((len(vec), 1)), index=index,
-                          columns=['dummy'])
-
-        return panel.to_wide()['dummy']
+        panel = DataFrame(vec, index=index, columns=['dummy'])
+        return panel.to_panel()['dummy']
 
     def _unstack_y(self, vec):
         unstacked = self._unstack_vector(vec)
@@ -455,12 +426,12 @@ class PanelOLS(OLS):
 
     @property
     def _nobs(self):
-        return len(self._y_trans_raw)
+        return len(self._y)
 
 def _convertDummies(dummies, mapping):
     # cleans up the names of the generated dummies
     new_items = []
-    for item in dummies.items:
+    for item in dummies.columns:
         if not mapping:
             var = str(item)
             if isinstance(item, float):
@@ -471,7 +442,7 @@ def _convertDummies(dummies, mapping):
             # renames the dummies if a conversion dict is provided
             new_items.append(mapping[int(item)])
 
-    dummies = LongPanel(dummies.values, index=dummies.index,
+    dummies = DataFrame(dummies.values, index=dummies.index,
                         columns=new_items)
 
     return dummies
@@ -489,7 +460,7 @@ def add_intercept(panel, name='intercept'):
 
     Parameters
     ----------
-    panel: Panel (Long or Wide)
+    panel: Panel / DataFrame
     name: string, default 'intercept']
 
     Returns
@@ -504,51 +475,10 @@ def add_intercept(panel, name='intercept'):
 class MovingPanelOLS(MovingOLS, PanelOLS):
     """Implements rolling/expanding panel OLS.
 
-    Parameters
-    ----------
-    y : DataFrame
-    x : Dict of DataFrame
-    intercept : bool
-        True if you want an intercept.
-    nw_lags : None or int
-        Number of Newey-West lags.
-    window_type : int
-        FULL_SAMPLE, ROLLING, EXPANDING.  FULL_SAMPLE by default.
-    window : int
-        size of window (for rolling/expanding OLS)
-    min_periods : int
-        Minimum number of time periods to include in the window
-    min_obs : int
-        Minimum number of total observations to require. Default is
-        rank(X matrix) + 1. In some cases we might want to be able to
-        relax this number.
-    weights : DataFrame
-        Weight for each observation.  The weights are not normalized;
-        they're multiplied directly by each observation.
-    pool : bool
-        Whether to run pooled panel regression.  Defaults to true.
-    entity_effects : bool
-        Whether to account for entity fixed effects.  Defaults to false.
-    time_effects : bool
-        Whether to account for time fixed effects.  Defaults to false.
-    x_effects : list
-        List of x's to account for fixed effects.  Defaults to none.
-    dropped_dummies : dict
-        Key is the name of the variable for the fixed effect.
-        Value is the value of that variable for which we drop the dummy.
-
-        For entity fixed effects, key equals 'entity'.
-
-        By default, the first dummy is dropped if no dummy is specified.
-    cluster : int
-        ENTITY or TIME, indicating entity/time clustering
-        A cluster is a grouping within which observations are correlated.
-
-        For example, if you have a panel data with countries over time and you suspect that:
-
-        1. Countries are correlated - use 'time'
-        2. There is autocorrelation - use 'entity'
+    See ols function docs
     """
+    _panel_model = True
+
     def __init__(self, y, x, weights=None,
                  window_type='expanding', window=None,
                  min_periods=None,
@@ -562,8 +492,7 @@ class MovingPanelOLS(MovingOLS, PanelOLS):
                  dropped_dummies=None,
                  verbose=False):
 
-        self._args = dict(weights=weights,
-                          intercept=intercept,
+        self._args = dict(intercept=intercept,
                           nw_lags=nw_lags,
                           nw_overlap=nw_overlap,
                           entity_effects=entity_effects,
@@ -573,12 +502,13 @@ class MovingPanelOLS(MovingOLS, PanelOLS):
                           dropped_dummies=dropped_dummies,
                           verbose=verbose)
 
-        PanelOLS.__init__(self, y=y, x=x, **self._args)
+        PanelOLS.__init__(self, y=y, x=x, weights=weights,
+                          **self._args)
 
         self._set_window(window_type, window, min_periods)
 
         if min_obs is None:
-            min_obs = len(self._x.items) + 1
+            min_obs = len(self._x.columns) + 1
 
         self._min_obs = min_obs
 
@@ -632,12 +562,12 @@ class MovingPanelOLS(MovingOLS, PanelOLS):
         x = self._x
         y = self._y
 
-        dates = x.major_axis
+        dates = x.index.levels[0]
 
         cluster_axis = None
-        if self._cluster == common.TIME:
+        if self._cluster == 'time':
             cluster_axis = 0
-        elif self._cluster == common.ENTITY:
+        elif self._cluster == 'entity':
             cluster_axis = 1
 
         nobs = self._nobs
@@ -718,7 +648,7 @@ class MovingPanelOLS(MovingOLS, PanelOLS):
         # XXX: what's the best way to determine where to start?
         # TODO: write unit tests for this
 
-        rank_threshold = len(self._x.items) + 1
+        rank_threshold = len(self._x.columns) + 1
         if self._min_obs < rank_threshold: # pragma: no cover
             warnings.warn('min_obs is smaller than rank of X matrix')
 
@@ -751,8 +681,8 @@ class NonPooledPanelOLS(object):
         True if you want an intercept.
     nw_lags : None or int
         Number of Newey-West lags.
-    window_type : int
-        FULL_SAMPLE, ROLLING, EXPANDING.  FULL_SAMPLE by default.
+    window_type : {'full_sample', 'rolling', 'expanding'}
+        'full_sample' by default
     window : int
         size of window (for rolling/expanding OLS)
     """
@@ -778,7 +708,7 @@ class NonPooledPanelOLS(object):
         'y_predict'
     ]
 
-    def __init__(self, y, x, window_type=common.FULL_SAMPLE, window=None,
+    def __init__(self, y, x, window_type='full_sample', window=None,
                  min_periods=None, intercept=True, nw_lags=None,
                  nw_overlap=False):
 
@@ -810,8 +740,6 @@ class NonPooledPanelOLS(object):
 def _var_beta_panel(y, x, beta, xx, rmse, cluster_axis,
                    nw_lags, nobs, df, nw_overlap):
     from pandas.core.frame import group_agg
-    from pandas.core.panel import LongPanel
-
     xx_inv = math.inv(xx)
 
     yv = y.values
@@ -828,12 +756,11 @@ def _var_beta_panel(y, x, beta, xx, rmse, cluster_axis,
             return np.dot(xx_inv, np.dot(xeps, xx_inv))
     else:
         Xb = np.dot(x.values, beta).reshape((len(x.values), 1))
-        resid = LongPanel(yv[:, None] - Xb, index=y.index,
-                          columns=['resid'])
+        resid = DataFrame(yv[:, None] - Xb, index=y.index, columns=['resid'])
 
         if cluster_axis == 1:
-            x = x.swapaxes()
-            resid = resid.swapaxes()
+            x = x.swaplevel(0, 1).sortlevel(0)
+            resid = resid.swaplevel(0, 1).sortlevel(0)
 
         m = group_agg(x.values * resid.values, x.index._bounds,
                       lambda x: np.sum(x, axis=0))
@@ -842,7 +769,7 @@ def _var_beta_panel(y, x, beta, xx, rmse, cluster_axis,
             nw_lags = 0
 
         xox = 0
-        for i in range(len(x.major_axis)):
+        for i in range(len(x.index.levels[0])):
             xox += math.newey_west(m[i : i + 1], nw_lags,
                                    nobs, df, nw_overlap)
 
@@ -854,7 +781,7 @@ def _xx_time_effects(x, y):
     """
     # X'X
     xx = np.dot(x.values.T, x.values)
-    xt = x.sum('minor').values
+    xt = x.sum(level=0).values
 
     count = y.unstack().count(1).values
     selector = count > 0

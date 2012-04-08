@@ -4,7 +4,7 @@ import unittest
 
 import numpy as np
 
-from pandas import Index, DataFrame
+from pandas import Index, MultiIndex, DataFrame
 from pandas.core.internals import *
 import pandas.core.internals as internals
 
@@ -138,6 +138,24 @@ class TestBlock(unittest.TestCase):
 
         self.assertRaises(Exception, self.fblock.delete, 'b')
 
+    def test_split_block_at(self):
+        left, right = self.fblock.split_block_at('a')
+        self.assert_(left is None)
+        self.assert_(np.array_equal(right.items, ['c', 'e']))
+
+        left, right = self.fblock.split_block_at('c')
+        self.assert_(np.array_equal(left.items, ['a']))
+        self.assert_(np.array_equal(right.items, ['e']))
+
+        left, right = self.fblock.split_block_at('e')
+        self.assert_(np.array_equal(left.items, ['a', 'c']))
+        self.assert_(right is None)
+
+        bblock = get_bool_ex(['f'])
+        left, right = bblock.split_block_at('f')
+        self.assert_(left is None)
+        self.assert_(right is None)
+
     def test_get(self):
         pass
 
@@ -179,10 +197,15 @@ class TestBlockManager(unittest.TestCase):
         mgr2 = self.mgr.reindex_axis(np.arange(N - 1), axis=1)
         self.assert_(not self.mgr._is_indexed_like(mgr2))
 
-    def test_block_id_vector(self):
+    def test_block_id_vector_item_dtypes(self):
         expected = [0, 1, 0, 1, 0, 2, 3]
         result = self.mgr.block_id_vector
         assert_almost_equal(expected, result)
+
+        result = self.mgr.item_dtypes
+        expected = ['float64', 'object', 'float64', 'object', 'float64',
+                    'bool', 'int64']
+        self.assert_(np.array_equal(result, expected))
 
     def test_union_block_items(self):
         blocks = [get_float_ex(['a', 'b', 'c']),
@@ -213,6 +236,13 @@ class TestBlockManager(unittest.TestCase):
     def test_get(self):
         pass
 
+    def test_get_scalar(self):
+        for item in self.mgr.items:
+            for i, index in enumerate(self.mgr.axes[1]):
+                res = self.mgr.get_scalar((item, index))
+                exp = self.mgr.get(item)[i]
+                assert_almost_equal(res, exp)
+
     def test_set(self):
         pass
 
@@ -227,13 +257,16 @@ class TestBlockManager(unittest.TestCase):
         self.assert_(mgr2.get('baz').dtype == np.object_)
 
         mgr2.set('quux', randn(N).astype(int))
-        self.assert_(mgr2.get('quux').dtype == np.int_)
+        self.assert_(mgr2.get('quux').dtype == np.int64)
 
         mgr2.set('quux', randn(N))
         self.assert_(mgr2.get('quux').dtype == np.float_)
 
     def test_copy(self):
-        pass
+        shallow = self.mgr.copy(deep=False)
+
+        for cp_blk, blk in zip(shallow.blocks, self.mgr.blocks):
+            self.assert_(cp_blk.values is blk.values)
 
     def test_as_matrix(self):
         pass
@@ -246,7 +279,7 @@ class TestBlockManager(unittest.TestCase):
 
         blocks = [get_int_ex(['a']), get_int_ex(['b'])]
         mgr = BlockManager.from_blocks(blocks, np.arange(index_sz))
-        self.assert_(mgr.as_matrix().dtype == np.int_)
+        self.assert_(mgr.as_matrix().dtype == np.int64)
 
     def test_xs(self):
         pass
@@ -287,8 +320,18 @@ class TestBlockManager(unittest.TestCase):
         _check_cols(self.mgr, reindexed, ['c', 'a', 'd'])
 
     def test_xs(self):
-        pass
+        index = MultiIndex(levels=[['foo', 'bar', 'baz', 'qux'],
+                                   ['one', 'two', 'three']],
+                           labels=[[0, 0, 0, 1, 1, 2, 2, 3, 3, 3],
+                                   [0, 1, 2, 0, 1, 1, 2, 0, 1, 2]],
+                           names=['first', 'second'])
 
+        self.mgr.set_axis(1, index)
+
+        result = self.mgr.xs('bar', axis=1)
+        expected = self.mgr.get_slice(slice(3, 5), axis=1)
+
+        assert_frame_equal(DataFrame(result), DataFrame(expected))
 
 if __name__ == '__main__':
     # unittest.main()

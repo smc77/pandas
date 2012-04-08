@@ -5,11 +5,17 @@ import itertools
 
 import numpy as np
 
-from pandas.core.frame import DataFrame
 from pandas.core.series import Series
+from pandas.core.frame import DataFrame
 
-from pandas.core.common import notnull
+from pandas.core.common import notnull, _ensure_platform_int
+from pandas.core.groupby import get_group_index
 from pandas.core.index import MultiIndex
+
+
+class ReshapeError(Exception):
+    pass
+
 
 class _Unstacker(object):
     """
@@ -17,8 +23,8 @@ class _Unstacker(object):
 
     Parameters
     ----------
-    level : int, default last level
-        Level to "unstack"
+    level : int or str, default last level
+        Level to "unstack". Accepts a name for the level.
 
     Examples
     --------
@@ -52,13 +58,13 @@ class _Unstacker(object):
             raise ValueError('must pass column labels for multi-column data')
 
         self.index = index
-
-        if level < 0:
-            level += index.nlevels
-        self.level = level
+        self.level = self.index._get_level_number(level)
 
         self.new_index_levels = list(index.levels)
-        self.removed_level = self.new_index_levels.pop(level)
+        self.new_index_names = list(index.names)
+
+        self.removed_name = self.new_index_names.pop(self.level)
+        self.removed_level = self.new_index_levels.pop(self.level)
 
         v = self.level
         lshape = self.index.levshape
@@ -81,12 +87,10 @@ class _Unstacker(object):
         new_levels = self.new_index_levels
 
         # make the mask
-        group_index = self.sorted_labels[0]
-        prev_stride = np.prod([len(x) for x in new_levels[1:]])
+        group_index = get_group_index(self.sorted_labels,
+                                      [len(x) for x in new_levels])
 
-        for lev, lab in zip(new_levels[1:], self.sorted_labels[1:-1]):
-            group_index = group_index * prev_stride + lab
-            prev_stride /= len(lev)
+        group_index = _ensure_platform_int(group_index)
 
         group_mask = np.zeros(self.full_shape[0], dtype=bool)
         group_mask.put(group_index, True)
@@ -100,6 +104,10 @@ class _Unstacker(object):
         unique_groups = np.arange(self.full_shape[0])[group_mask]
         compressor = group_index.searchsorted(unique_groups)
 
+        if mask.sum() < len(self.index):
+            raise ReshapeError('Index contains duplicate entries, '
+                               'cannot reshape')
+
         self.group_mask = group_mask
         self.group_index = group_index
         self.mask = mask
@@ -109,26 +117,32 @@ class _Unstacker(object):
     def get_result(self):
         # TODO: find a better way than this masking business
 
-        values, mask = self.get_new_values()
+        values, value_mask = self.get_new_values()
         columns = self.get_new_columns()
         index = self.get_new_index()
 
         # filter out missing levels
-        values = values[:, mask]
-        columns = columns[mask]
+        if values.shape[1] > 0:
+            mask = value_mask.sum(0) > 0
+            values = values[:, mask]
+            columns = columns[mask]
 
         return DataFrame(values, index=index, columns=columns)
 
     def get_new_values(self):
+        return self._reshape_values(self.values)
+
+    def _reshape_values(self, values):
+        values = self.values
         # place the values
         length, width = self.full_shape
-        stride = self.values.shape[1]
+        stride = values.shape[1]
         result_width = width * stride
 
-        new_values = np.empty((length, result_width), dtype=self.values.dtype)
+        new_values = np.empty((length, result_width), dtype=values.dtype)
         new_mask = np.zeros((length, result_width), dtype=bool)
 
-        if issubclass(self.values.dtype.type, np.integer):
+        if issubclass(values.dtype.type, np.integer):
             new_values = new_values.astype(float)
 
         new_values.fill(np.nan)
@@ -142,7 +156,7 @@ class _Unstacker(object):
             mask_chunk.flat[self.mask] = True
 
         new_values = new_values.take(self.unique_groups, axis=0)
-        return new_values, new_mask.sum(0) > 0
+        return new_values, new_mask
 
     def get_new_columns(self):
         if self.value_columns is None:
@@ -153,17 +167,22 @@ class _Unstacker(object):
         propagator = np.repeat(np.arange(width), stride)
         if isinstance(self.value_columns, MultiIndex):
             new_levels = self.value_columns.levels + [self.removed_level]
+            new_names = self.value_columns.names + [self.removed_name]
+
             new_labels = [lab.take(propagator)
                           for lab in self.value_columns.labels]
             new_labels.append(np.tile(np.arange(stride), width))
         else:
             new_levels = [self.value_columns, self.removed_level]
+            new_names = [self.value_columns.name, self.removed_name]
+
             new_labels = []
 
             new_labels.append(propagator)
             new_labels.append(np.tile(np.arange(stride), width))
 
-        return MultiIndex(levels=new_levels, labels=new_labels)
+        return MultiIndex(levels=new_levels, labels=new_labels,
+                          names=new_names)
 
     def get_new_index(self):
         result_labels = []
@@ -173,9 +192,11 @@ class _Unstacker(object):
         # construct the new index
         if len(self.new_index_levels) == 1:
             new_index = self.new_index_levels[0].take(self.unique_groups)
+            new_index.name = self.new_index_names[0]
         else:
             new_index = MultiIndex(levels=self.new_index_levels,
-                                   labels=result_labels)
+                                   labels=result_labels,
+                                   names=self.new_index_names)
 
         return new_index
 
@@ -185,7 +206,8 @@ def pivot(self, index=None, columns=None, values=None):
     """
     index_vals = self[index]
     column_vals = self[columns]
-    mindex = MultiIndex.from_arrays([index_vals, column_vals])
+    mindex = MultiIndex.from_arrays([index_vals, column_vals],
+                                    names=[index, columns])
 
     if values is None:
         items = self.columns - [index, columns]
@@ -261,6 +283,49 @@ def _slow_pivot(index, columns, values):
 
     return DataFrame(tree)
 
+def unstack(obj, level):
+    if isinstance(obj, DataFrame):
+        if isinstance(obj.index, MultiIndex):
+            return _unstack_frame(obj, level)
+        else:
+            return obj.T.stack(dropna=False)
+    else:
+        unstacker = _Unstacker(obj.values, obj.index, level=level)
+        return unstacker.get_result()
+
+def _unstack_frame(obj, level):
+    from pandas.core.internals import BlockManager, make_block
+
+    if obj._is_mixed_type:
+        unstacker = _Unstacker(np.empty(obj.shape, dtype=bool), # dummy
+                               obj.index, level=level,
+                               value_columns=obj.columns)
+        new_columns = unstacker.get_new_columns()
+        new_index = unstacker.get_new_index()
+        new_axes = [new_columns, new_index]
+
+        new_blocks = []
+        mask_blocks = []
+        for blk in obj._data.blocks:
+            bunstacker = _Unstacker(blk.values.T, obj.index, level=level,
+                                    value_columns=blk.items)
+            new_items = bunstacker.get_new_columns()
+            new_values, mask = bunstacker.get_new_values()
+
+            mblk = make_block(mask.T, new_items, new_columns)
+            mask_blocks.append(mblk)
+
+            newb = make_block(new_values.T, new_items, new_columns)
+            new_blocks.append(newb)
+
+        result = DataFrame(BlockManager(new_blocks, new_axes))
+        mask_frame = DataFrame(BlockManager(mask_blocks, new_axes))
+        return result.ix[:, mask_frame.sum(0) > 0]
+    else:
+        unstacker = _Unstacker(obj.values, obj.index, level=level,
+                               value_columns=obj.columns)
+        return unstacker.get_result()
+
 def stack(frame, level=-1, dropna=True):
     """
     Convert DataFrame to Series with multi-level Index. Columns become the
@@ -271,10 +336,14 @@ def stack(frame, level=-1, dropna=True):
     stacked : Series
     """
     N, K = frame.shape
+    if isinstance(level, int) and level < 0:
+        level += frame.columns.nlevels
+
+    level = frame.columns._get_level_number(level)
+
     if isinstance(frame.columns, MultiIndex):
         return _stack_multi_columns(frame, level=level, dropna=True)
     elif isinstance(frame.index, MultiIndex):
-
         new_levels = list(frame.index.levels)
         new_levels.append(frame.columns)
 
@@ -282,14 +351,15 @@ def stack(frame, level=-1, dropna=True):
         new_labels.append(np.tile(np.arange(K), N).ravel())
 
         new_names = list(frame.index.names)
-        new_names.append('columns')
+        new_names.append(frame.columns.name)
         new_index = MultiIndex(levels=new_levels, labels=new_labels,
                                names=new_names)
     else:
         ilabels = np.arange(N).repeat(K)
         clabels = np.tile(np.arange(K), N).ravel()
         new_index = MultiIndex(levels=[frame.index, frame.columns],
-                               labels=[ilabels, clabels])
+                               labels=[ilabels, clabels],
+                               names=[frame.index.name, frame.columns.name])
 
     new_values = frame.values.ravel()
     if dropna:
@@ -300,8 +370,6 @@ def stack(frame, level=-1, dropna=True):
 
 def _stack_multi_columns(frame, level=-1, dropna=True):
     this = frame.copy()
-    if level < 0:
-        level += frame.columns.nlevels
 
     # this makes life much simpler
     if level != frame.columns.nlevels - 1:
@@ -354,7 +422,7 @@ def _stack_multi_columns(frame, level=-1, dropna=True):
     else:
         new_levels = [this.index]
         new_labels = [np.arange(N).repeat(levsize)]
-        new_names = ['index'] # something better?
+        new_names = [this.index.name] # something better?
 
     new_levels.append(frame.columns.levels[level])
     new_labels.append(np.tile(np.arange(levsize), N))
@@ -372,3 +440,160 @@ def _stack_multi_columns(frame, level=-1, dropna=True):
 
     return result
 
+
+def melt(frame, id_vars=None, value_vars=None):
+    """
+    "Unpivots" a DataFrame from wide format to long format, optionally leaving
+    id variables set
+
+    Parameters
+    ----------
+    frame : DataFrame
+    id_vars :
+    value_vars :
+
+    Examples
+    --------
+    >>> df
+    A B C
+    a 1 2
+    b 3 4
+    c 5 6
+
+    >>> melt(df, id_vars=['A'])
+    A variable value
+    a B        1
+    b B        3
+    c B        5
+    a C        2
+    b C        4
+    c C        6
+    """
+    # TODO: what about the existing index?
+
+    N, K = frame.shape
+
+    mdata = {}
+
+    if id_vars is not None:
+        id_vars = list(id_vars)
+        frame = frame.copy()
+        K -= len(id_vars)
+        for col in id_vars:
+            mdata[col] = np.tile(frame.pop(col).values, K)
+    else:
+        id_vars = []
+
+    mcolumns = id_vars + ['variable', 'value']
+
+    mdata['value'] = frame.values.ravel('F')
+    mdata['variable'] = np.asarray(frame.columns).repeat(N)
+    return DataFrame(mdata, columns=mcolumns)
+
+def convert_dummies(data, cat_variables, prefix_sep='_'):
+    """
+    Compute DataFrame with specified columns converted to dummy variables (0 /
+    1). Result columns will be prefixed with the column name, then the level
+    name, e.g. 'A_foo' for column A and level foo
+
+    Parameters
+    ----------
+    data : DataFrame
+    cat_variables : list-like
+        Must be column names in the DataFrame
+    prefix_sep : string, default '_'
+        String to use to separate column name from dummy level
+
+    Returns
+    -------
+    dummies : DataFrame
+    """
+    result = data.drop(cat_variables, axis=1)
+    for variable in cat_variables:
+        dummies = make_column_dummies(data, variable, prefix=True,
+                                      prefix_sep=prefix_sep)
+        result = result.join(dummies)
+    return result
+
+def make_column_dummies(data, column, prefix=False, prefix_sep='_'):
+    from pandas import Factor
+    factor = Factor(data[column].values)
+    dummy_mat = np.eye(len(factor.levels)).take(factor.labels, axis=0)
+
+    if prefix:
+        dummy_cols = ['%s%s%s' % (column, prefix_sep, str(v))
+                      for v in factor.levels]
+    else:
+        dummy_cols = factor.levels
+    dummies = DataFrame(dummy_mat, index=data.index, columns=dummy_cols)
+    return dummies
+
+def make_axis_dummies(frame, axis='minor', transform=None):
+    """
+    Construct 1-0 dummy variables corresponding to designated axis
+    labels
+
+    Parameters
+    ----------
+    axis : {'major', 'minor'}, default 'minor'
+    transform : function, default None
+        Function to apply to axis labels first. For example, to
+        get "day of week" dummies in a time series regression you might
+        call:
+            make_axis_dummies(panel, axis='major',
+                              transform=lambda d: d.weekday())
+    Returns
+    -------
+    dummies : DataFrame
+        Column names taken from chosen axis
+    """
+    from pandas import Factor
+
+    numbers = {
+        'major' : 0,
+        'minor' : 1
+    }
+    num = numbers.get(axis, axis)
+
+    items = frame.index.levels[num]
+    labels = frame.index.labels[num]
+    if transform is not None:
+        mapped_items = items.map(transform)
+        factor = Factor(mapped_items.take(labels))
+        labels = factor.labels
+        items = factor.levels
+
+    values = np.eye(len(items), dtype=float)
+    values = values.take(labels, axis=0)
+
+    return DataFrame(values, columns=items, index=frame.index)
+
+def block2d_to_block3d(values, items, shape, major_labels, minor_labels,
+                       ref_items=None):
+    """
+    Developer method for pivoting DataFrame -> Panel. Used in HDFStore and
+    DataFrame.to_panel
+    """
+    from pandas.core.internals import make_block
+    panel_shape = (len(items),) + shape
+
+    # TODO: lexsort depth needs to be 2!!
+
+    # Create observation selection vector using major and minor
+    # labels, for converting to panel format.
+    selector = minor_labels + shape[1] * major_labels
+    mask = np.zeros(np.prod(shape), dtype=bool)
+    mask.put(selector, True)
+
+    pvalues = np.empty(panel_shape, dtype=values.dtype)
+    if not issubclass(pvalues.dtype.type, np.integer):
+        pvalues.fill(np.nan)
+
+    values = values
+    for i in xrange(len(items)):
+        pvalues[i].flat[mask] = values[:, i]
+
+    if ref_items is None:
+        ref_items = items
+
+    return make_block(pvalues, items, ref_items)

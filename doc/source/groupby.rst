@@ -28,12 +28,16 @@ following:
 
  - **Aggregation**: computing a summary statistic (or statistics) about each
    group. Some examples:
+
     - Compute group sums or means
     - Compute group sizes / counts
+
  - **Transformation**: perform some group-specific computations and return a
    like-indexed. Some examples:
+
     - Standardizing data (zscore) within group
     - Filling NAs within groups with a value derived from each group
+
  - Some combination of the above: GroupBy will examine the results of the apply
    step and try to return a sensibly combined result if it doesn't fit into
    either of the above two categories
@@ -121,6 +125,8 @@ only verifies that you've passed a valid mapping.
    GroupBy operations (though can't be guaranteed to be the most
    efficient). You can get quite creative with the label mapping functions.
 
+.. _groupby.attributes:
+
 GroupBy object attributes
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -142,6 +148,17 @@ the length of the ``groups`` dict, so it is largely just a convenience:
    grouped.groups
    len(grouped)
 
+By default the group keys are sorted during the groupby operation. You may
+however pass ``sort``=``False`` for potential speedups:
+
+.. ipython:: python
+
+   df2 = DataFrame({'X' : ['B', 'B', 'A', 'A'], 'Y' : [1, 2, 3, 4]})
+   df2.groupby(['X'], sort=True).sum()
+   df2.groupby(['X'], sort=False).sum()
+
+.. _groupby.multiindex:
+
 GroupBy with MultiIndex
 ~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -155,7 +172,7 @@ natural to group by one of the levels of the hierarchy.
              ['one', 'two', 'one', 'two', 'one', 'two', 'one', 'two']]
    tuples = zip(*arrays)
    tuples
-   index = MultiIndex.from_tuples(tuples)
+   index = MultiIndex.from_tuples(tuples, names=['first', 'second'])
    s = Series(randn(8), index=index)
 
 .. ipython:: python
@@ -164,9 +181,39 @@ natural to group by one of the levels of the hierarchy.
    grouped = s.groupby(level=0)
    grouped.sum()
 
-More on the ``sum`` function and aggregation later. Grouping with multiple
-levels (as opposed to a single level) is not yet supported, though implementing
-it is not difficult.
+If the MultiIndex has names specified, these can be passed instead of the level
+number:
+
+.. ipython:: python
+
+   s.groupby(level='second').sum()
+
+The aggregation functions such as ``sum`` will take the level parameter
+directly. Additionally, the resulting index will be named according to the
+chosen level:
+
+.. ipython:: python
+
+   s.sum(level='second')
+
+Also as of v0.6, grouping with multiple levels is supported.
+
+.. ipython:: python
+   :suppress:
+
+   arrays = [['bar', 'bar', 'baz', 'baz', 'foo', 'foo', 'qux', 'qux'],
+             ['doo', 'doo', 'bee', 'bee', 'bop', 'bop', 'bop', 'bop'],
+             ['one', 'two', 'one', 'two', 'one', 'two', 'one', 'two']]
+   tuples = zip(*arrays)
+   index = MultiIndex.from_tuples(tuples, names=['first', 'second', 'third'])
+   s = Series(randn(8), index=index)
+
+.. ipython:: python
+
+   s
+   s.groupby(level=['first','second']).sum()
+
+More on the ``sum`` function and aggregation later.
 
 DataFrame column selection in GroupBy
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -246,12 +293,16 @@ changed by using the ``as_index`` option:
    grouped = df.groupby(['A', 'B'], as_index=False)
    grouped.aggregate(np.sum)
 
-Note that you could use the ``delevel`` DataFrame function to achieve the same
-result as the column names are stored in the resulting ``MultiIndex``:
+   df.groupby('A', as_index=False).sum()
+
+Note that you could use the ``reset_index`` DataFrame function to achieve the
+same result as the column names are stored in the resulting ``MultiIndex``:
 
 .. ipython:: python
 
-   df.groupby(['A', 'B']).sum().delevel()
+   df.groupby(['A', 'B']).sum().reset_index()
+
+.. _groupby.aggregate.multifunc:
 
 Applying multiple functions at once
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -272,8 +323,15 @@ function's name (stored in the function object) will be used.
    grouped['D'].agg({'result1' : np.sum,
                      'result2' : np.mean})
 
-We would like to enable this functionality for DataFrame, too. The result will
-likely have a MultiIndex for the columns.
+On a grouped DataFrame, you can pass a list of functions to apply to each
+column, which produces an aggregated result with a hierarchical index:
+
+.. ipython:: python
+
+   grouped.agg([np.sum, np.mean, np.std])
+
+Passing a dict of functions has different behavior by default, see the next
+section.
 
 Applying different functions to DataFrame columns
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -294,11 +352,13 @@ must be either implemented on GroupBy or available via :ref:`dispatching
 
    grouped.agg({'C' : 'sum', 'D' : 'std'})
 
+.. _groupby.aggregate.cython:
+
 Cython-optimized aggregation functions
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Some common aggregations, currently only ``sum`` and ``mean``, have optimized
-Cython implementations:
+Some common aggregations, currently only ``sum``, ``mean``, and ``std``, have
+optimized Cython implementations:
 
 .. ipython:: python
 
@@ -385,8 +445,8 @@ Flexible ``apply``
 
 Some operations on the grouped data might not fit into either the aggregate or
 transform categories. Or, you may simply want GroupBy to infer how to combine
-the results. For these, use the ``apply`` function, which can be substitute for
-both ``aggregate`` and ``transform`` in many standard use cases. However,
+the results. For these, use the ``apply`` function, which can be substituted
+for both ``aggregate`` and ``transform`` in many standard use cases. However,
 ``apply`` can handle some exceptional use cases, for example:
 
 .. ipython:: python

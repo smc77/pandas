@@ -1,28 +1,76 @@
-#/usr/bin/env python
+#!/usr/bin/env python
 
 """
 Parts of this file were taken from the pyzmq project
-(https://github.com/zeromq/pyzmq) and hence are subject to the terms of the
-Lesser GPU General Public License.
+(https://github.com/zeromq/pyzmq) which have been permitted for use under the
+BSD license. Parts are from lxml (https://github.com/lxml/lxml)
 """
-# use setuptools if available
-# try:
-#     from setuptools import setup
-#     _have_setuptools = True
-# except ImportError:
-#     _have_setuptools = False
 
 from datetime import datetime
 from glob import glob
 import os
 import sys
 import shutil
+import warnings
 
-import numpy as np
+# may need to work around setuptools bug by providing a fake Pyrex
+try:
+    import Cython
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "fake_pyrex"))
+except ImportError:
+    pass
 
-# from numpy.distutils.core import setup
+# try bootstrapping setuptools if it doesn't exist
+try:
+    import pkg_resources
+    try:
+        pkg_resources.require("setuptools>=0.6c5")
+    except pkg_resources.VersionConflict:
+        from ez_setup import use_setuptools
+        use_setuptools(version="0.6c5")
+    from setuptools import setup, Command
+    _have_setuptools = True
+except ImportError:
+    # no setuptools installed
+    from distutils.core import setup, Command
+    _have_setuptools = False
 
-from distutils.core import setup, Command
+setuptools_kwargs = {}
+if sys.version_info[0] >= 3:
+
+    setuptools_kwargs = {'use_2to3': True,
+                         'zip_safe': False,
+                         'install_requires': ['python-dateutil >= 2',
+                                              'numpy >= 1.4'],
+                        }
+    if not _have_setuptools:
+        sys.exit("need setuptools/distribute for Py3k"
+            "\n$ pip install distribute")
+
+else:
+    setuptools_kwargs = {
+        'install_requires': ['python-dateutil < 2',
+                             'numpy >= 1.4'],
+        'zip_safe' : False,
+    }
+    if not _have_setuptools:
+        try:
+            import numpy
+            import dateutil
+            setuptools_kwargs = {}
+        except ImportError:
+            sys.exit("install requires: 'python-dateutil < 2','numpy'."
+                     "  use pip or easy_install."
+                     "\n   $ pip install 'python-dateutil < 2' 'numpy'")
+
+try:
+    import numpy as np
+except ImportError:
+    nonumpy_msg = ("# numpy needed to finish setup.  run:\n\n"
+    "    $ pip install numpy  # or easy_install numpy\n")
+    sys.exit(nonumpy_msg)
+
+
 from distutils.extension import Extension
 from distutils.command.build import build
 from distutils.command.build_ext import build_ext
@@ -30,36 +78,79 @@ from distutils.command.sdist import sdist
 
 from os.path import splitext, basename, join as pjoin
 
-DESCRIPTION = "Cross-section and time series data analysis toolkit"
+DESCRIPTION = "Powerful data structures for data analysis and statistics"
 LONG_DESCRIPTION = """
-pandas provides NumPy-based data structures and statistical tools for
-common time series and cross-sectional data sets. It is intended to
-accomplish the following:
+**pandas** is a Python package providing fast, flexible, and expressive data
+structures designed to make working with "relational" or "labeled" data both
+easy and intuitive. It aims to be the fundamental high-level building block for
+doing practical, **real world** data analysis in Python. Additionally, it has
+the broader goal of becoming **the most powerful and flexible open source data
+analysis / manipulation tool available in any language**. It is already well on
+its way toward this goal.
 
-* Simplify working with possibly labeled 1, 2, and 3 dimensional
-  heterogeneous data sets commonly found in statistics, finance, and
-  econometrics.
+pandas is well suited for many different kinds of data:
 
-* Provide tools for working with dates, fixed-frequency custom date
-  ranges, and other necessary time series functionality
+  - Tabular data with heterogeneously-typed columns, as in an SQL table or
+    Excel spreadsheet
+  - Ordered and unordered (not necessarily fixed-frequency) time series data.
+  - Arbitrary matrix data (homogeneously typed or heterogeneous) with row and
+    column labels
+  - Any other form of observational / statistical data sets. The data actually
+    need not be labeled at all to be placed into a pandas data structure
 
-* Provide IO utilities for getting data in and out of pandas
+The two primary data structures of pandas, Series (1-dimensional) and DataFrame
+(2-dimensional), handle the vast majority of typical use cases in finance,
+statistics, social science, and many areas of engineering. For R users,
+DataFrame provides everything that R's ``data.frame`` provides and much
+more. pandas is built on top of `NumPy <http://www.numpy.org>`__ and is
+intended to integrate well within a scientific computing environment with many
+other 3rd party libraries.
 
-* Implement common statistical and time series functionality with a
-  convenient interface, handling missing data and other common
-  problems associated with messy statistical data sets
+Here are just a few of the things that pandas does well:
+
+  - Easy handling of **missing data** (represented as NaN) in floating point as
+    well as non-floating point data
+  - Size mutability: columns can be **inserted and deleted** from DataFrame and
+    higher dimensional objects
+  - Automatic and explicit **data alignment**: objects can be explicitly
+    aligned to a set of labels, or the user can simply ignore the labels and
+    let `Series`, `DataFrame`, etc. automatically align the data for you in
+    computations
+  - Powerful, flexible **group by** functionality to perform
+    split-apply-combine operations on data sets, for both aggregating and
+    transforming data
+  - Make it **easy to convert** ragged, differently-indexed data in other
+    Python and NumPy data structures into DataFrame objects
+  - Intelligent label-based **slicing**, **fancy indexing**, and **subsetting**
+    of large data sets
+  - Intuitive **merging** and **joining** data sets
+  - Flexible **reshaping** and pivoting of data sets
+  - **Hierarchical** labeling of axes (possible to have multiple labels per
+    tick)
+  - Robust IO tools for loading data from **flat files** (CSV and delimited),
+    Excel files, databases, and saving / loading data from the ultrafast **HDF5
+    format**
+  - **Time series**-specific functionality: date range generation and frequency
+    conversion, moving window statistics, moving window linear regressions,
+    date shifting and lagging, etc.
+
+Many of these principles are here to address the shortcomings frequently
+experienced using other languages / scientific research environments. For data
+scientists, working with data is typically divided into multiple stages:
+munging and cleaning data, analyzing / modeling it, then organizing the results
+of the analysis into a form suitable for plotting or tabular display. pandas is
+the ideal tool for all of these tasks.
 
 Note
 ----
-Windows binaries built against NumPy 1.5.1
+Windows binaries built against NumPy 1.6.1
 """
 
 DISTNAME = 'pandas'
 LICENSE = 'BSD'
-AUTHOR = "AQR Capital Management, LLC"
-MAINTAINER = "Wes McKinney"
-MAINTAINER_EMAIL = "wesmckinn@gmail.com"
-URL = "http://github.com/wesm/pandas"
+AUTHOR = "The PyData Development Team"
+EMAIL = "pystatsmodels@googlegroups.com"
+URL = "http://pandas.pydata.org"
 DOWNLOAD_URL = ''
 CLASSIFIERS = [
     'Development Status :: 4 - Beta',
@@ -67,37 +158,50 @@ CLASSIFIERS = [
     'Operating System :: OS Independent',
     'Intended Audience :: Science/Research',
     'Programming Language :: Python',
+    'Programming Language :: Python :: 2',
+    'Programming Language :: Python :: 3',
     'Programming Language :: Cython',
     'Topic :: Scientific/Engineering',
 ]
 
 MAJOR = 0
-MINOR = 4
-MICRO = 0
+MINOR = 7
+MICRO = 3
 ISRELEASED = False
 VERSION = '%d.%d.%d' % (MAJOR, MINOR, MICRO)
+QUALIFIER = ''
 
 FULLVERSION = VERSION
 if not ISRELEASED:
     FULLVERSION += '.dev'
     try:
         import subprocess
-        pipe = subprocess.Popen(["git", "rev-parse", "--short", "HEAD"],
-                                stdout=subprocess.PIPE).stdout
+        try:
+            pipe = subprocess.Popen(["git", "rev-parse", "--short", "HEAD"],
+                                    stdout=subprocess.PIPE).stdout
+        except OSError:
+            # msysgit compatibility
+            pipe = subprocess.Popen(["git.cmd", "rev-parse", "--short", "HEAD"],
+                                    stdout=subprocess.PIPE).stdout
         rev = pipe.read().strip()
+        # makes distutils blow up on Python 2.7
+        if sys.version_info[0] >= 3:
+            rev = rev.decode('ascii')
+
         FULLVERSION += "-%s" % rev
     except:
-        print "WARNING: Couldn't get git revision"
+        warnings.warn("WARNING: Couldn't get git revision")
+else:
+    FULLVERSION += QUALIFIER
 
 def write_version_py(filename='pandas/version.py'):
     cnt = """\
-from datetime import datetime
-
 version = '%s'
+short_version = '%s'
 """
     a = open(filename, 'w')
     try:
-        a.write(cnt % FULLVERSION)
+        a.write(cnt % (FULLVERSION, VERSION))
     finally:
         a.close()
 
@@ -112,7 +216,8 @@ class CleanCommand(Command):
         self._clean_trees = []
         for root, dirs, files in list(os.walk('pandas')):
             for f in files:
-                if os.path.splitext(f)[-1] in ('.pyc', '.so', '.o', '.pyd'):
+                if os.path.splitext(f)[-1] in ('.pyc', '.so', '.o',
+                                               '.pyd', '.c'):
                     self._clean_me.append(pjoin(root, f))
             for d in dirs:
                 if d == '__pycache__':
@@ -172,10 +277,10 @@ class CheckingBuildExt(build_ext):
         for ext in extensions:
           for src in ext.sources:
             if not os.path.exists(src):
-                print """Cython-generated file '%s' not found.
+                raise Exception("""Cython-generated file '%s' not found.
                 Cython is required to compile pandas from a development branch.
                 Please install Cython or download a release package of pandas.
-                """ % src
+                """ % src)
 
     def build_extensions(self):
         self.check_cython_extensions(self.extensions)
@@ -219,44 +324,82 @@ else:
     cmdclass['build_ext'] =  build_ext
     cmdclass['sdist'] =  CheckSDist
 
-tseries_depends = ['reindex', 'io', 'common', 'groupby'
-                   'skiplist', 'isnull', 'moments', 'operators']
-
+tseries_depends = ['reindex', 'groupby', 'skiplist', 'moments',
+                   'generated', 'reduce', 'stats',
+                   'inference', 'properties', 'internals',
+                   'hashtable', 'join']
 def srcpath(name=None, suffix='.pyx', subdir='src'):
     return pjoin('pandas', subdir, name+suffix)
 
+if suffix == '.pyx':
+    tseries_depends = [srcpath(f, suffix='.pyx')
+                       for f in tseries_depends]
+    tseries_depends.append('pandas/src/util.pxd')
+else:
+    tseries_depends = []
+
 tseries_ext = Extension('pandas._tseries',
+                        depends=tseries_depends + ['pandas/src/numpy_helper.h'],
                         sources=[srcpath('tseries', suffix=suffix)],
-                        # depends=[srcpath(f, suffix='.pyx')
-                        #          for f in tseries_depends],
-                        include_dirs=[np.get_include()])
+                        include_dirs=[np.get_include()],
+                        # extra_compile_args=['-Wconversion']
+                        )
+
 sparse_ext = Extension('pandas._sparse',
                        sources=[srcpath('sparse', suffix=suffix)],
                        include_dirs=[np.get_include()])
-extensions = [tseries_ext,
-              sparse_ext]
 
-setuptools_args = {}
+engines_ext = Extension('pandas._engines',
+                        depends=['pandas/src/numpy_helper.h',
+                                 'pandas/src/util.pxd'],
+                        sources=[srcpath('engines', suffix=suffix)],
+                        include_dirs=[np.get_include()])
+
+sandbox_ext = Extension('pandas._sandbox',
+                        sources=[srcpath('sandbox', suffix=suffix)],
+                        include_dirs=[np.get_include()])
+
+cppsandbox_ext = Extension('pandas._cppsandbox',
+                           language='c++',
+                           sources=[srcpath('cppsandbox', suffix=suffix)],
+                           include_dirs=[np.get_include()])
+
+extensions = [tseries_ext, engines_ext, sparse_ext]
+
+if not ISRELEASED:
+    extensions.extend([sandbox_ext])
 
 # if _have_setuptools:
-#     setuptools_args["test_suite"] = "nose.collector"
+#     setuptools_kwargs["test_suite"] = "nose.collector"
 
+write_version_py()
 setup(name=DISTNAME,
       version=FULLVERSION,
-      maintainer=MAINTAINER,
+      maintainer=AUTHOR,
       packages=['pandas',
                 'pandas.core',
                 'pandas.io',
+                'pandas.rpy',
+                'pandas.sandbox',
+                'pandas.sparse',
+                'pandas.sparse.tests',
                 'pandas.stats',
-                'pandas.util'],
-      package_data={'pandas' : ['tests/*.py'],
-                    'pandas.io' : ['tests/*.py',
-                                   'tests/*.h5',
+                'pandas.util',
+                'pandas.tests',
+                'pandas.tools',
+                'pandas.tools.tests',
+                'pandas.io.tests',
+                'pandas.stats.tests',
+                ],
+      package_data={'pandas.io' : ['tests/*.h5',
                                    'tests/*.csv',
-                                   'tests/*.xls'],
-                    'pandas.stats' : ['tests/*.py']},
+                                   'tests/*.xls',
+                                   'tests/*.table'],
+                    'pandas.tests' : ['data/*.pickle',
+                                      'data/*.csv']
+                   },
       ext_modules=extensions,
-      maintainer_email=MAINTAINER_EMAIL,
+      maintainer_email=EMAIL,
       description=DESCRIPTION,
       license=LICENSE,
       cmdclass = cmdclass,
@@ -265,4 +408,4 @@ setup(name=DISTNAME,
       long_description=LONG_DESCRIPTION,
       classifiers=CLASSIFIERS,
       platforms='any',
-      **setuptools_args)
+      **setuptools_kwargs)

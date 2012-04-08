@@ -56,6 +56,7 @@ logic via subclasses:
     Week, "one week, optionally anchored on a day of the week"
     MonthEnd, "calendar month end"
     BMonthEnd, "business month end"
+    QuarterEnd, "calendar quarter end"
     BQuarterEnd, "business quarter end"
     YearEnd, "calendar year end"
     YearBegin, "calendar year begin"
@@ -76,6 +77,7 @@ We could have done the same thing with ``DateOffset``:
 
 .. ipython:: python
 
+   from pandas.core.datetools import *
    d + DateOffset(months=4, days=5)
 
 The key features of a ``DateOffset`` object are:
@@ -324,7 +326,7 @@ Here is a fully-worked example:
    grouped = ts.groupby(hourly.asof)
    grouped.mean()
 
-Some things to note:
+Some things to note about this method:
 
   - This is rather inefficient because we haven't exploited the orderedness of
     the data at all. Calling the ``asof`` function on every date in the

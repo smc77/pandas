@@ -1,15 +1,6 @@
 .. currentmodule:: pandas
 .. _basics:
 
-*************
-pandas basics
-*************
-
-We'll start with a quick, non-comprehensive overview of the fundamental data
-structures in pandas to get you started. The fundamental behavior about data
-types, indexing, and axis labeling / alignment apply across all of the
-objects. To get started, import numpy and load pandas into your namespace:
-
 .. ipython:: python
    :suppress:
 
@@ -18,522 +9,38 @@ objects. To get started, import numpy and load pandas into your namespace:
    randn = np.random.randn
    np.set_printoptions(precision=4, suppress=True)
 
-.. ipython:: python
-
-   import numpy as np
-   # will use a lot in examples
-   randn = np.random.randn
-   from pandas import *
-
-Here is a basic tenet to keep in mind: **data alignment is intrinsic**. Link
-between labels and data will not be broken unless done so explicitly by you.
-
-We'll give a brief intro to the data structures, then consider all of the broad
-categories of functionality and methods in separate sections.
-
-.. _basics.series:
-
-Series
-------
-
-:class:`Series` is a one-dimensional labeled array (technically a subclass of
-ndarray) capable of holding any data type (integers, strings, floating point
-numbers, Python objects, etc.). The axis labels are collectively referred to as
-the **index**. The basic method to create a Series is to call:
-
-::
-
-    >>> s = Series(data, index=index)
-
-Here, ``data`` can be many different things:
-
- - a Python dict
- - an ndarray
- - a scalar value (like 5)
-
-The passed **index** is a list of axis labels. Thus, this separates into a few
-cases depending on what **data is**:
-
-**From ndarray**
-
-If ``data`` is an ndarray, **index** must be the same length as **data**. If no
-index is passed, one will be created having values ``[0, ..., len(data) - 1]``.
-
-.. ipython:: python
-
-   s = Series(randn(5), index=['a', 'b', 'c', 'd', 'e'])
-   s
-   s.index
-
-   Series(randn(5))
-
-.. note::
-
-    The values in the index must be unique. If they are not, an exception will
-    **not** be raised immediately, but attempting any operation involving the
-    index will later result in an exception. In other words, the Index object
-    containing the labels "lazily" checks whether the values are unique. The
-    reason for being lazy is nearly all performance-based (there are many
-    instances in computations, like parts of GroupBy, where the index is not
-    used).
-
-**From dict**
-
-If ``data`` is a dict, if **index** is passed the values in data corresponding
-to the labels in the index will be pulled out. Otherwise, an index will be
-constructed from the sorted keys of the dict, if possible.
-
-.. ipython:: python
-
-   d = {'a' : 0., 'b' : 1., 'c' : 2.}
-   Series(d)
-   Series(d, index=['b', 'c', 'd', 'a'])
-
-.. note::
-
-    NaN (not a number) is the standard missing data marker used in pandas
-
-**From scalar value** If ``data`` is a scalar value, an index must be
-provided. The value will be repeated to match the length of **index**
-
-.. ipython:: python
-
-   Series(5., index=['a', 'b', 'c', 'd', 'e'])
-
-Series is ndarray-like
-~~~~~~~~~~~~~~~~~~~~~~
-
-As a subclass of ndarray, Series is a valid argument to most NumPy functions
-and behaves similarly to a NumPy array. However, things like slicing also slice
-the index.
-
-.. ipython :: python
-
-    s[0]
-    s[:3]
-    s[s > s.median()]
-    s[[4, 3, 1]]
-    np.exp(s)
-
-We will address array-based indexing in a separate :ref:`section <indexing>`.
-
-Series is dict-like
-~~~~~~~~~~~~~~~~~~~
-
-A Series is alike a fixed-size dict in that you can get and set values by index
-label:
-
-.. ipython :: python
-
-    s['a']
-    s['e'] = 12.
-    s
-    'e' in s
-    'f' in s
-
-If a label is not contained, an exception
-
-.. code-block:: python
-
-    >>> s['f']
-    KeyError: 'f'
-
-    >>> s.get('f')
-    nan
-
-Vectorized operations and label alignment with Series
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-When doing data analysis, as with raw NumPy arrays looping through Series
-value-by-value is usually not necessary. Series can be also be passed into most
-NumPy methods expecting an ndarray.
-
-
-.. ipython:: python
-
-    s + s
-    s * 2
-    np.exp(s)
-
-A key difference between Series and ndarray is that operations between Series
-automatically align the data based on label. Thus, you can write computations
-without giving consideration to whether the Series involved have the same
-labels.
-
-.. ipython:: python
-
-    s[1:] + s[:-1]
-
-The result of an operation between unaligned Series will have the **union** of
-the indexes involved. If a label is not found in one Series or the other, the
-result will be marked as missing (NaN). Being able to write code without doing
-any explicit data alignment grants immense freedom and flexibility in
-interactive data analysis and research. The integrated data alignment features
-of the pandas data structures set pandas apart from the majority of related
-tools for working with labeled data.
-
-.. note::
-
-    In general, we chose to make the default result of operations between
-    differently indexed objects yield the **union** of the indexes in order to
-    avoid loss of information. Having an index label, though the data is
-    missing, is typically important information as part of a computation. You
-    of course have the option of dropping labels with missing data via the
-    **dropna** function.
-
-.. _basics.dataframe:
-
-DataFrame
----------
-
-**DataFrame** is a 2-dimensional labeled data structure with columns of
-potentially different types. You can think of it like a spreadsheet or SQL
-table, or a dict of Series objects. It is generally the most commonly used
-pandas object. Like Series, DataFrame accepts many different kinds of input:
-
- - Dict of 1D ndarrays, lists, dicts, or Series
- - 2-D numpy.ndarray
- - `Structured or record
-   <http://docs.scipy.org/doc/numpy/user/basics.rec.html>`__ ndarray
- - Another DataFrame
-
-Along with the data, you can optionally pass **index** (row labels) and
-**columns** (column labels) arguments. If you pass an index and / or columns,
-pyou are guaranteeing the index and / or columns of the resulting
-DataFrame. Thus, a dict of Series plus a specific index will discard all data
-not matching up to the passed index.
-
-If axis labels are not passed, they will be constructed from the input data
-based on common sense rules.
-
-**From dict of Series or dicts**
-
-the result **index** will be the **union** of the indexes of the various
-Series. If there are any nested dicts, these will be first converted to
-Series. If no columns are passed, the columns will be the sorted list of dict
-keys.
-
-.. ipython:: python
-
-    d = {'one' : Series([1., 2., 3.], index=['a', 'b', 'c']),
-         'two' : Series([1., 2., 3., 4.], index=['a', 'b', 'c', 'd'])}
-    df = DataFrame(d)
-    df
-
-    DataFrame(d, index=['d', 'b', 'a'])
-    DataFrame(d, index=['d', 'b', 'a'], columns=['two', 'three'])
-
-The row and column labels can be accessed respectively by accessing the
-**index** and **columns** attributes:
-
-.. note::
-
-   When a particular set of columns is passed along with a dict of data, the
-   passed columns override the keys in the dict.
-
-.. ipython:: python
-
-   df.index
-   df.columns
-
-**From dict of ndarrays / lists**
-
-The ndarrays must all be the same length. If an index is passed, it must
-clearly also be the same length as the arrays. If no index is passed, the
-result will be ``range(n)``, where ``n`` is the array length.
-
-.. ipython:: python
-
-   d = {'one' : [1., 2., 3., 4.],
-        'two' : [4., 3., 2., 1.]}
-   DataFrame(d)
-   DataFrame(d, index=['a', 'b', 'c', 'd'])
-
-**From structured or record array**
-
-This case is handled identically to a dict of arrays.
-
-.. ipython:: python
-
-   data = np.zeros((2,),dtype=[('A', 'i4'),('B', 'f4'),('C', 'a10')])
-   data[:] = [(1,2.,'Hello'),(2,3.,"World")]
-
-   DataFrame(data)
-   DataFrame(data, index=['first', 'second'])
-   DataFrame(data, columns=['C', 'A', 'B'])
-
-.. note::
-
-    DataFrame is not intended to work exactly like a 2-dimensional NumPy
-    ndarray.
-
-Column selection, addition, deletion
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-You can treat a DataFrame semantically like a dict of like-indexed Series
-objects. Getting, setting, and deleting columns works with the same syntax as
-the analogous dict operations:
-
-.. ipython:: python
-
-   df['one']
-   df['three'] = df['one'] * df['two']
-   df['flag'] = df['one'] > 2
-   df
-
-Columns can be deleted or popped like with a dict:
-
-.. ipython:: python
-
-   del df['two']
-   three = df.pop('three')
-   df
-
-When inserting a scalar value, it will naturally be propagated to fill the
-column:
-
-.. ipython:: python
-
-   df['foo'] = 'bar'
-   df
-
-When inserting a Series that does not have the same index as the DataFrame, it
-will be conformed to the DataFrame's index:
-
-.. ipython:: python
-
-   df['one_trunc'] = df['one'][:2]
-   df
-
-You can insert raw ndarrays but their length must match the length of the
-DataFrame's index.
-
-By default, columns get inserted at the end. The ``insert`` function is
-available to insert at a particular location in the columns:
-
-.. ipython:: python
-
-   df.insert(1, 'bar', df['one'])
-   df
-
-Indexing / Selection
-~~~~~~~~~~~~~~~~~~~~
-The basics of indexing are as follows:
-
-.. csv-table::
-    :header: "Operation", "Syntax", "Result"
-    :widths: 30, 20, 10
-
-    Select column, ``df[col]``, Series
-    Select row by label, ``df.xs(label)`` or ``df.ix[label]``, Series
-    Select row by location (int), ``df.ix[loc]``, Series
-    Slice rows, ``df[5:10]``, DataFrame
-    Select rows by boolean vector, ``df[bool_vec]``, DataFrame
-
-Row selection, for example, returns a Series whose index is the columns of the
-DataFrame:
-
-.. ipython:: python
-
-   df.xs('b')
-   df.ix[2]
-
-Note if a DataFrame contains columns of multiple dtypes, the dtype of the row
-will be chosen to accommodate all of the data types (dtype=object is the most
-general).
-
-For a more exhaustive treatment of more sophisticated label-based indexing and
-slicing, see the :ref:`section on indexing <indexing>`. We will address the
-fundamentals of reindexing / conforming to new sets of lables in the
-:ref:`section on reindexing <basics.reindexing>`.
-
-Data alignment and arithmetic
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Data alignment between DataFrame objects automatically align on **both the
-columns and the index (row labels)**. Again, the resulting object will have the
-union of the column and row labels.
-
-.. ipython:: python
-
-    df = DataFrame(randn(10, 4), columns=['A', 'B', 'C', 'D'])
-    df2 = DataFrame(randn(7, 3), columns=['A', 'B', 'C'])
-    df + df2
-
-When doing an operation between DataFrame and Series, the default behavior is
-to align the Series **index** on the DataFrame **columns**, thus `broadcasting
-<http://docs.scipy.org/doc/numpy/user/basics.broadcasting.html>`__
-row-wise. For example:
-
-.. ipython:: python
-
-   df - df.ix[0]
-
-In the special case of working with time series data, if the Series is a
-TimeSeries (which it will be automatically if the index contains datetime
-objects), and the DataFrame index also contains dates, the broadcasting will be
-column-wise:
+*****************************
+Essential basic functionality
+*****************************
+
+Here we discuss a lot of the essential functionality common to the pandas data
+structures. Here's how to create some of the objects used in the examples from
+the previous section:
 
 .. ipython:: python
 
    index = DateRange('1/1/2000', periods=8)
+   s = Series(randn(5), index=['a', 'b', 'c', 'd', 'e'])
    df = DataFrame(randn(8, 3), index=index,
                   columns=['A', 'B', 'C'])
-   df
-   type(df['A'])
-   df - df['A']
-
-Technical purity aside, this case is so common in practice that supporting the
-special case is preferable to the alternative of forcing the user to transpose
-and do column-based alignment like so:
-
-.. ipython:: python
-
-   (df.T - df['A']).T
-
-For explicit control over the matching and broadcasting behavior, see the
-section on :ref:`flexible binary operations <basics.binop>`.
-
-Operations with scalars are just as you would expect:
-
-.. ipython:: python
-
-   df * 5 + 2
-   1 / df
-   df ** 4
-
-Transposing
-~~~~~~~~~~~
-
-To transpose, access the ``T`` attribute (also the ``transpose`` function),
-similar to an ndarray:
-
-.. ipython:: python
-
-   # only show the first 5 rows
-   df[:5].T
-
-DataFrame interoperability with NumPy functions
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Elementwise NumPy ufuncs (log, exp, sqrt, ...) and various other NumPy functions
-can be used with no issues on DataFrame, assuming the data within are numeric:
-
-.. ipython:: python
-
-   np.exp(df)
-   np.asarray(df)
-
-DataFrame is not intended to be a drop-in replacement for ndarray as its
-indexing semantics are quite different in places from a matrix.
-
-Console display
-~~~~~~~~~~~~~~~
-
-For very large DataFrame objects, only a summary will be printed to the console
-(here I am reading a CSV version of the **baseball** dataset from the **plyr**
-R package):
-
-.. ipython:: python
-
-   baseball = read_csv('baseball.csv')
-   baseball
-
-However, using ``to_string`` will display any DataFrame in tabular form, though
-it won't always fit the console width:
-
-.. ipython:: python
-
-   baseball.ix[-20:, :12].to_string()
-
-.. _basics.panel:
-
-Panel
------
-
-Panel is a somewhat less-used, but still important container for 3-dimensional
-data. The term `panel data <http://en.wikipedia.org/wiki/Panel_data>`__ is
-derived from econometrics and is partially responsible for the name pandas:
-pan(el)-da(ta)-s. The names for the 3 axes are intended to give some semantic
-meaning to describing operations involving panel data and, in particular,
-econometric analysis of panel data. However, for the strict purposes of slicing
-and dicing a collection of DataFrame objects, you may find the axis names
-slightly arbitrary:
-
-  - **items**: axis 0, each item corresponds to a DataFrame contained inside
-  - **major_axis**: axis 1, it is the **index** (rows) of each of the
-    DataFrames
-  - **minor_axis**: axis 2, it is the **columns** of each of the DataFrames
-
-Construction of Panels works about like you would expect:
-
-**3D ndarray with optional axis labels**
-
-.. ipython:: python
-
    wp = Panel(randn(2, 5, 4), items=['Item1', 'Item2'],
               major_axis=DateRange('1/1/2000', periods=5),
               minor_axis=['A', 'B', 'C', 'D'])
-   wp
 
+.. _basics.head_tail:
 
-**dict of DataFrame objects**
+Head and Tail
+-------------
 
-.. ipython:: python
-
-   data = {'Item1' : DataFrame(randn(4, 3)),
-           'Item2' : DataFrame(randn(4, 2))}
-   Panel(data)
-
-Note that the values in the dict need only be **convertible to
-DataFrame**. Thus, they can be any of the other valid inputs to DataFrame as
-per above.
-
-.. note::
-
-   Unfortunately Panel, being less commonly used than Series and DataFrame,
-   has been slightly neglected feature-wise. A number of methods and options
-   available in DataFrame are not available in Panel. This will get worked
-   on, of course, in future releases. And faster if you join me in working on
-   the codebase.
-
-Item selection / addition / deletion
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-Similar to DataFrame functioning as a dict of Series, Panel is like a dict
-of DataFrames:
+To view a small sample of a Series or DataFrame object, use the ``head`` and
+``tail`` methods. The default number of elements to display is five, but you
+may pass a custom number.
 
 .. ipython:: python
 
-   wp['Item1']
-   wp['Item3'] = wp['Item1'] / wp['Item2']
-
-The API for insertion and deletion is the same as for DataFrame.
-
-Indexing / Selection
-~~~~~~~~~~~~~~~~~~~~
-
-As of this writing, indexing with Panel is a bit more restrictive than in
-DataFrame. Notably, :ref:`advanced indexing <indexing>` via the **ix** property
-has not yet been integrated in Panel. This will be done, however, in a
-future release.
-
-.. csv-table::
-    :header: "Operation", "Syntax", "Result"
-    :widths: 30, 20, 10
-
-    Select item, ``wp[item]``, DataFrame
-    Get slice at major_axis label, ``wp.major_xs(val)``, DataFrame
-    Get slice at minor_axis label, ``wp.minor_xs(val)``, DataFrame
-
-For example, using the earlier example data, we could do:
-
-.. ipython:: python
-
-    wp['Item1']
-    wp.major_xs(wp.major_axis[2])
-    wp.minor_axis
-    wp.minor_xs('C')
+   long_series = Series(randn(1000))
+   long_series.head()
+   long_series.tail(3)
 
 .. _basics.attrs:
 
@@ -579,21 +86,20 @@ unlike the axis labels, cannot be assigned to.
     strings are involved, the result will be of object dtype. If there are only
     floats and integers, the resulting array will be of float dtype.
 
-
 .. _basics.binop:
 
 Flexible binary operations
 --------------------------
 
-With binary operations between pandas data structures, we have a couple items
+With binary operations between pandas data structures, there are two key points
 of interest:
 
-  * How to describe broadcasting behavior between higher- (e.g. DataFrame) and
+  * Broadcasting behavior between higher- (e.g. DataFrame) and
     lower-dimensional (e.g. Series) objects.
-  * Behavior of missing data in computations
+  * Missing data in computations
 
-We will demonstrate the currently-available functions to illustrate these
-issues independently, though they can be performed simultaneously.
+We will demonstrate how to manage these issues independently, though they can
+be handled simultaneously.
 
 Matching / broadcasting behavior
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -666,6 +172,43 @@ replace NaN with some other value using ``fillna`` if you wish).
    df + df2
    df.add(df2, fill_value=0)
 
+Combining overlapping data sets
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A problem occasionally arising is the combination of two similar data sets
+where values in one are preferred over the other. An example would be two data
+series representing a particular economic indicator where one is considered to
+be of "higher quality". However, the lower quality series might extend further
+back in history or have more complete data coverage. As such, we would like to
+combine two DataFrame objects where missing values in one DataFrame are
+conditionally filled with like-labeled values from the other DataFrame. The
+function implementing this operation is ``combine_first``, which we illustrate:
+
+.. ipython:: python
+
+   df1 = DataFrame({'A' : [1., np.nan, 3., 5., np.nan],
+                    'B' : [np.nan, 2., 3., np.nan, 6.]})
+   df2 = DataFrame({'A' : [5., 2., 4., np.nan, 3., 7.],
+                    'B' : [np.nan, np.nan, 3., 4., 6., 8.]})
+   df1
+   df2
+   df1.combine_first(df2)
+
+General DataFrame Combine
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The ``combine_first`` method above calls the more general DataFrame method
+``combine``. This method takes another DataFrame and a combiner function,
+aligns the input DataFrame and then passes the combiner function pairs of
+Series (ie, columns whose names are the same).
+
+So, for instance, to reproduce ``combine_first`` as above:
+
+.. ipython:: python
+
+   combiner = lambda x, y: np.where(isnull(x), y, x)
+   df1.combine(df2, combiner)
+
 .. _basics.stats:
 
 Descriptive statistics
@@ -693,6 +236,14 @@ For example:
    df.mean(0)
    df.mean(1)
 
+All such methods have a ``skipna`` option signaling whether to exclude missing
+data (``True`` by default):
+
+.. ipython:: python
+
+   df.sum(0, skipna=False)
+   df.sum(axis=1, skipna=True)
+
 Combined with the broadcasting / arithmetic behavior, one can describe various
 statistical procedures, like standardization (rendering data zero mean and
 standard deviation 1), very concisely:
@@ -711,7 +262,9 @@ values:
 
    df.cumsum()
 
-Here is a quick reference summary table of common functions
+Here is a quick reference summary table of common functions. Each also takes an
+optional ``level`` parameter which applies only if the object has a
+:ref:`hierarchical index<indexing.hierarchical>`.
 
 .. csv-table::
     :header: "Function", "Description"
@@ -720,9 +273,11 @@ Here is a quick reference summary table of common functions
     ``count``, Number of non-null observations
     ``sum``, Sum of values
     ``mean``, Mean of values
+    ``mad``, Mean absolute deviation
     ``median``, Arithmetic median of values
     ``min``, Minimum
     ``max``, Maximum
+    ``abs``, Absolute Value
     ``prod``, Product of values
     ``std``, Unbiased standard deviation
     ``var``, Unbiased variance
@@ -731,21 +286,34 @@ Here is a quick reference summary table of common functions
     ``quantile``, Sample quantile (value at %)
     ``cumsum``, Cumulative sum
     ``cumprod``, Cumulative product
+    ``cummax``, Cumulative maximum
+    ``cummin``, Cumulative minimum
 
 Note that by chance some NumPy methods, like ``mean``, ``std``, and ``sum``,
-will exclude NAs on Series input:
+will exclude NAs on Series input by default:
 
 .. ipython:: python
 
    np.mean(df['one'])
    np.mean(df['one'].values)
 
+``Series`` also has a method ``nunique`` which will return the number of unique
+non-null values:
+
+.. ipython:: python
+
+   series = Series(randn(500))
+   series[20:500] = np.nan
+   series[10:20]  = 5
+   series.nunique()
+
+
 Summarizing data: describe
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-For floating point data, there is a convenient ``describe`` function which
-computes a variety of summary statistics about a Series or the columns of a
-DataFrame (excluding NAs of course):
+There is a convenient ``describe`` function which computes a variety of summary
+statistics about a Series or the columns of a DataFrame (excluding NAs of
+course):
 
 .. ipython:: python
 
@@ -756,35 +324,38 @@ DataFrame (excluding NAs of course):
     frame.ix[::2] = np.nan
     frame.describe()
 
-Correlations between objects
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+.. _basics.describe:
 
-Several handy methods for computing correlations are provided. The only
-behavior available at the moment is to compute "pairwise complete
-observations". In computing correlations in the presence of missing data, one
-must be careful internally to compute the standard deviation of each Series
-over the labels with valid data in both objects.
+For a non-numerical Series object, `describe` will give a simple summary of the
+number of unique values and most frequently occurring values:
+
 
 .. ipython:: python
 
-   # Series with Series
-   frame['a'].corr(frame['b'])
+   s = Series(['a', 'a', 'b', 'b', 'a', 'a', np.nan, 'c', 'd', 'a'])
+   s.describe()
 
-   # Pairwise correlation of DataFrame columns
-   frame.corr()
+There also is a utility function, ``value_range`` which takes a DataFrame and
+returns a series with the minimum/maximum values in the DataFrame.
 
-A related method ``corrwith`` is implemented on DataFrame to compute the
-correlation between like-labeled Series contained in different DataFrame
-objects.
+.. _basics.idxmin:
+
+Index of Min/Max Values
+~~~~~~~~~~~~~~~~~~~~~~~
+
+The ``idxmin`` and ``idxmax`` functions on Series and DataFrame compute the
+index labels with the minimum and maximum corresponding values:
 
 .. ipython:: python
 
-   index = ['a', 'b', 'c', 'd', 'e']
-   columns = ['one', 'two', 'three', 'four']
-   df1 = DataFrame(randn(5, 4), index=index, columns=columns)
-   df2 = DataFrame(randn(4, 4), index=index[:4], columns=columns)
-   df1.corrwith(df2)
-   df2.corrwith(df1, axis=1)
+   s1 = Series(randn(5))
+   s1
+   s1.idxmin(), s1.idxmax()
+
+   df1 = DataFrame(randn(5,3), columns=['A','B','C'])
+   df1
+   df1.idxmin(axis=0)
+   df1.idxmax(axis=1)
 
 .. _basics.apply:
 
@@ -817,6 +388,19 @@ maximum value for each column occurred:
                     index=DateRange('1/1/2000', periods=1000))
    tsdf.apply(lambda x: x.index[x.dropna().argmax()])
 
+You may also pass additional arguments and keyword arguments to the ``apply``
+method. For instance, consider the following function you would like to apply:
+
+.. code-block:: python
+
+   def subtract_and_divide(x, sub, divide=1):
+       return (x - sub) / divide
+
+You may then apply this function as follows:
+
+.. code-block:: python
+
+   df.apply(subtract_and_divide, args=(5,), divide=3)
 
 Another useful feature is the ability to pass Series methods to carry out some
 Series operation on each column or row:
@@ -832,6 +416,12 @@ Series operation on each column or row:
 
    tsdf
    tsdf.apply(Series.interpolate)
+
+Finally, ``apply`` takes an argument ``raw`` which is False by default, which
+converts each row or column into a Series before applying the function. When
+set to True, the passed function will instead receive an ndarray object, which
+has positive performance implications if you do not need the indexing
+functionality.
 
 .. seealso::
 
@@ -900,6 +490,9 @@ With a DataFrame, you can simultaneously reindex the index and columns:
    df
    df.reindex(index=['c', 'f', 'b'], columns=['three', 'two', 'one'])
 
+For convenience, you may utilize the ``reindex_axis`` method, which takes the
+labels and a keyword ``axis`` paramater.
+
 Note that the ``Index`` objects containing the actual axis labels can be
 **shared** between objects. So if we have a Series and a DataFrame, the
 following can be done:
@@ -935,7 +528,7 @@ Reindexing to align with another object
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 You may wish to take an object and reindex its axes to be labeled the same as
-another object. While the syntax for this is straightforwad albeit verbose, it
+another object. While the syntax for this is straightforward albeit verbose, it
 is a common enough operation that the ``reindex_like`` method is available to
 make this simpler:
 
@@ -951,6 +544,57 @@ make this simpler:
    df
    df2
    df.reindex_like(df2)
+
+Reindexing with ``reindex_axis``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. _basics.align:
+
+Aligning objects with each other with ``align``
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The ``align`` method is the fastest way to simultaneously align two objects. It
+supports a ``join`` argument (related to :ref:`joining and merging <merging>`):
+
+  - ``join='outer'``: take the union of the indexes
+  - ``join='left'``: use the calling object's index
+  - ``join='right'``: use the passed object's index
+  - ``join='inner'``: intersect the indexes
+
+It returns a tuple with both of the reindexed Series:
+
+.. ipython:: python
+
+   s = Series(randn(5), index=['a', 'b', 'c', 'd', 'e'])
+   s1 = s[:4]
+   s2 = s[1:]
+   s1.align(s2)
+   s1.align(s2, join='inner')
+   s1.align(s2, join='left')
+
+.. _basics.df_join:
+
+For DataFrames, the join method will be applied to both the index and the
+columns by default:
+
+.. ipython:: python
+
+   df.align(df2, join='inner')
+
+You can also pass an ``axis`` option to only align on the specified axis:
+
+.. ipython:: python
+
+   df.align(df2, join='inner', axis=0)
+
+.. _basics.align.frame.series:
+
+If you pass a Series to ``DataFrame.align``, you can choose to align both
+objects either on the DataFrame's index or columns using the ``axis`` argument:
+
+.. ipython:: python
+
+   df.align(df2.ix[0], axis=1)
 
 .. _basics.reindex_fill:
 
@@ -1041,6 +685,15 @@ Series, it need only contain a subset of the labels as keys:
    df.rename(columns={'one' : 'foo', 'two' : 'bar'},
              index={'a' : 'apple', 'b' : 'banana', 'd' : 'durian'})
 
+The ``rename`` method also provides a ``copy`` named parameter that is by
+default ``True`` and copies the underlying data. Pass ``copy=False`` to rename
+the data in place.
+
+.. _basics.rename_axis:
+
+The Panel class has an a related ``rename_axis`` class which can rename any of
+its three axes.
+
 Iteration
 ---------
 
@@ -1078,6 +731,47 @@ For example:
       ...:     print frame
       ...:
 
+
+.. _basics.iterrows:
+
+iterrows
+~~~~~~~~
+
+New in v0.7 is the ability to iterate efficiently through rows of a
+DataFrame. It returns an iterator yielding each index value along with a Series
+containing the data in each row:
+
+.. ipython::
+
+   In [0]: for row_index, row in df2.iterrows():
+      ...:     print '%s\n%s' % (row_index, row)
+      ...:
+
+
+For instance, a contrived way to transpose the dataframe would be:
+
+.. ipython:: python
+
+   df2 = DataFrame({'x': [1, 2, 3], 'y': [4, 5, 6]})
+   print df2
+   print df2.T
+
+   df2_t = DataFrame(dict((idx,values) for idx, values in df2.iterrows()))
+   print df2_t
+
+itertuples
+~~~~~~~~~~
+
+This method will return an iterator yielding a tuple for each row in the
+DataFrame. The first element of the tuple will be the row's corresponding index
+value, while the remaining values are the row values proper.
+
+For instance,
+
+.. ipython:: python
+
+   for r in df2.itertuples(): print r
+
 .. _basics.sorting:
 
 Sorting by index and value
@@ -1102,6 +796,13 @@ determine the sort order:
 .. ipython:: python
 
    df.sort_index(by='two')
+
+The ``by`` argument can take a list of column names, e.g.:
+
+.. ipython:: python
+
+   df = DataFrame({'one':[2,1,1,1],'two':[1,3,2,4],'three':[5,4,3,2]})
+   df[['one', 'two', 'three']].sort_index(by=['one','two'])
 
 Series has the method ``order`` (analogous to `R's order function
 <http://stat.ethz.ch/R-manual/R-patched/library/base/html/order.html>`__) which
@@ -1153,23 +854,87 @@ alternately passing the ``dtype`` keyword argument to the object constructor.
    df = DataFrame(np.arange(12).reshape((4, 3)), dtype=float)
    df[0].dtype
 
+.. _basics.cast.infer:
+
+Inferring better types for object columns
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The ``convert_objects`` DataFrame method will attempt to convert
+``dtype=object`` columns to a better NumPy dtype. Occasionally (after
+transposing multiple times, for example), a mixed-type DataFrame will end up
+with everything as ``dtype=object``. This method attempts to fix that:
+
+.. ipython:: python
+
+   df = DataFrame(randn(6, 3), columns=['a', 'b', 'c'])
+   df['d'] = 'foo'
+   df
+   df = df.T.T
+   df.dtypes
+   converted = df.convert_objects()
+   converted.dtypes
+
 .. _basics.serialize:
 
 Pickling and serialization
 --------------------------
 
-All pandas objects are equipped with ``save`` and ``load`` methods which use
-Python's ``cPickle`` module to save and load data structures to disk using the
-pickle format.
+All pandas objects are equipped with ``save`` methods which use Python's
+``cPickle`` module to save data structures to disk using the pickle format.
 
 .. ipython:: python
 
    df
    df.save('foo.pickle')
-   DataFrame.load('foo.pickle')
+
+The ``load`` function in the ``pandas`` namespace can be used to load any
+pickled pandas object (or any other pickled object) from file:
+
+
+.. ipython:: python
+
+   load('foo.pickle')
+
+There is also a ``save`` function which takes any object as its first argument:
+
+.. ipython:: python
+
+   save(df, 'foo.pickle')
+   load('foo.pickle')
 
 .. ipython:: python
    :suppress:
 
    import os
    os.remove('foo.pickle')
+
+Console Output Formatting
+-------------------------
+
+.. _basics.console_output:
+
+Use the ``set_eng_float_format`` function in the ``pandas.core.common`` module
+to alter the floating-point formatting of pandas objects to produce a particular
+format.
+
+For instance:
+
+.. ipython:: python
+
+   set_eng_float_format(accuracy=3, use_eng_prefix=True)
+   df['a']/1.e3
+   df['a']/1.e6
+
+.. ipython:: python
+   :suppress:
+
+   reset_printoptions()
+
+
+The ``set_printoptions`` function has a number of options for controlling how
+floating point numbers are formatted (using hte ``precision`` argument) in the
+console and . The ``max_rows`` and ``max_columns`` control how many rows and
+columns of DataFrame objects are shown by default. If ``max_columns`` is set to
+0 (the default, in fact), the library will attempt to fit the DataFrame's
+string representation into the current terminal width, and defaulting to the
+summary view otherwise.

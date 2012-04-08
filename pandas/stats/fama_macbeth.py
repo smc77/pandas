@@ -25,7 +25,7 @@ def fama_macbeth(**kwargs):
     return klass(**kwargs)
 
 class FamaMacBeth(object):
-    def __init__(self, y, x, weights=None, intercept=True, nw_lags=None,
+    def __init__(self, y, x, intercept=True, nw_lags=None,
                  nw_lags_beta=None,
                  entity_effects=False, time_effects=False, x_effects=None,
                  cluster=None, dropped_dummies={}, verbose=False):
@@ -33,13 +33,13 @@ class FamaMacBeth(object):
 
         from pandas.stats.plm import MovingPanelOLS
         self._ols_result = MovingPanelOLS(
-            y=y, x=x, weights=weights, window_type='rolling', window=1,
+            y=y, x=x, window_type='rolling', window=1,
             intercept=intercept,
             nw_lags=nw_lags, entity_effects=entity_effects,
             time_effects=time_effects, x_effects=x_effects, cluster=cluster,
             dropped_dummies=dropped_dummies, verbose=verbose)
 
-        self._cols = self._ols_result._x.items
+        self._cols = self._ols_result._x.columns
 
     @cache_readonly
     def _beta_raw(self):
@@ -75,11 +75,6 @@ class FamaMacBeth(object):
     @cache_readonly
     def t_stat(self):
         return self._make_result(self._t_stat_raw)
-
-    @cache_readonly
-    def _result_index(self):
-        mask = self._ols_result._rolling_ols_call[1]
-        return self._index[mask]
 
     @cache_readonly
     def _results(self):
@@ -141,7 +136,7 @@ Formula: Y ~ %(formulaRHS)s
         return template % params
 
 class MovingFamaMacBeth(FamaMacBeth):
-    def __init__(self, y, x, weights=None, window_type='rolling', window=10,
+    def __init__(self, y, x, window_type='rolling', window=10,
                  intercept=True, nw_lags=None, nw_lags_beta=None,
                  entity_effects=False, time_effects=False, x_effects=None,
                  cluster=None, dropped_dummies={}, verbose=False):
@@ -149,7 +144,7 @@ class MovingFamaMacBeth(FamaMacBeth):
         self._window = window
 
         FamaMacBeth.__init__(
-            self, y=y, x=x, weights=weights, intercept=intercept,
+            self, y=y, x=x, intercept=intercept,
             nw_lags=nw_lags, nw_lags_beta=nw_lags_beta,
             entity_effects=entity_effects, time_effects=time_effects,
             x_effects=x_effects, cluster=cluster,
@@ -160,7 +155,7 @@ class MovingFamaMacBeth(FamaMacBeth):
 
     @property
     def _is_rolling(self):
-        return self._window_type == common.ROLLING
+        return self._window_type == 'rolling'
 
     def _calc_stats(self):
         mean_betas = []
@@ -195,8 +190,9 @@ class MovingFamaMacBeth(FamaMacBeth):
 
     @cache_readonly
     def _result_index(self):
-        mask = self._ols_result._rolling_ols_call[1]
-        return self._index[mask]
+        mask = self._ols_result._rolling_ols_call[2]
+        # HACK XXX
+        return self._index[mask.cumsum() >= self._window]
 
     @cache_readonly
     def _results(self):

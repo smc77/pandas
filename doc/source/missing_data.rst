@@ -63,14 +63,18 @@ computations. Since in NumPy divide-by-zero generates ``inf`` or ``-inf`` and
 not ``NaN``, I think you will find this is a worthwhile trade-off (Zen of
 Python: "practicality beats purity").
 
+.. _missing.isnull:
+
 To make detecting missing values easier (and across different array dtypes),
-pandas provides the ``isnull`` and ``notnull`` functions:
+pandas provides the :func:`~pandas.core.common.isnull` and
+:func:`~pandas.core.common.notnull` functions, which are also methods on
+``Series`` objects:
 
 .. ipython:: python
 
    df2['one']
    isnull(df2['one'])
-   notnull(df2['four'])
+   df2['four'].notnull()
 
 **Summary:** ``NaN``, ``inf``, ``-inf``, and ``None`` (in object arrays) are
 all considered missing by the ``isnull`` and ``notnull`` functions.
@@ -125,8 +129,6 @@ Cleaning / filling missing data
 pandas objects are equipped with various data manipulation methods for dealing
 with missing data.
 
-dropna:
-
 .. _missing_data.fillna:
 
 Filling missing values: fillna
@@ -164,6 +166,8 @@ To remind you, these are the available filling methods:
 
 With time series data, using pad/ffill is extremely common so that the "last
 known value" is available at every time point.
+
+.. _missing_data.dropna:
 
 Dropping axis labels with missing data: dropna
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -215,6 +219,8 @@ for interpolation methods outside of the filling methods described above.
    @savefig series_interpolate.png width=6in
    axes[1].set_title('Interpolated')
 
+   plt.close('all')
+
 Missing data casting rules and indexing
 ---------------------------------------
 
@@ -250,6 +256,7 @@ an ndarray (e.g. selecting values based on some criteria). If a boolean vector
 contains NAs, an exception will be generated:
 
 .. ipython:: python
+   :okexcept:
 
    reindexed = s.reindex(range(8)).fillna(0)
    reindexed[crit]

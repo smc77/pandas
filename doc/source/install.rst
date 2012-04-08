@@ -8,7 +8,7 @@ Installation
 
 You have the option to install an `official release
 <http://pypi.python.org/pypi/pandas>`__ or to build the `development version
-<http://github.com/wesm/pandas>`__. If you choose to install from source and
+<http://github.com/pydata/pandas>`__. If you choose to install from source and
 are running Windows, you will have to ensure that you have a compatible C
 compiler (MinGW or Visual Studio) installed. `How-to install MinGW on Windows
 <http://docs.cython.org/src/tutorial/appendix.html>`__
@@ -16,9 +16,11 @@ compiler (MinGW or Visual Studio) installed. `How-to install MinGW on Windows
 Python version support
 ~~~~~~~~~~~~~~~~~~~~~~
 
-Officially Python 2.5 to 2.7. I will aim for Python 3.x support in the next
-release. Python 2.4 support is being phased out since the userbase has shrunk
-significantly.
+Officially Python 2.5 to 2.7 and Python 3.1+, although Python 3 support is less
+well tested. Python 2.4 support is being phased out since the userbase has
+shrunk significantly. Continuing Python 2.4 support will require either monetary
+development support or someone contributing to the project to maintain
+compatibility.
 
 
 Binary installers
@@ -41,6 +43,8 @@ Optional dependencies
   * `matplotlib <http://matplotlib.sourceforge.net/>`__: for plotting
   * `scikits.statsmodels <http://statsmodels.sourceforge.net/>`__
      * Needed for parts of :mod:`pandas.stats`
+  * `pytz <http://pytz.sourceforge.net/>`__
+     * Needed for time zone support with ``DateRange``
 
 .. note::
 
@@ -59,12 +63,12 @@ Installing from source
    files. I recommend installing the latest Cython via ``easy_install -U
    Cython``
 
-The source code is hosted at http://github.com/wesm/pandas, it can be checked
+The source code is hosted at http://github.com/pydata/pandas, it can be checked
 out using git and compiled / installed like so:
 
 ::
 
-  git clone git://github.com/wesm/pandas.git
+  git clone git://github.com/pydata/pandas.git
   cd pandas
   python setup.py install
 

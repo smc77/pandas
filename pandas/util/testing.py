@@ -1,9 +1,13 @@
+from __future__ import division
+
 # pylint: disable-msg=W0402
 
 from datetime import datetime
 import random
 import string
 import sys
+
+from distutils.version import LooseVersion
 
 from numpy.random import randn
 import numpy as np
@@ -29,7 +33,7 @@ N = 30
 K = 4
 
 def rands(n):
-    choices = string.letters + string.digits
+    choices = string.ascii_letters + string.digits
     return ''.join([random.choice(choices) for _ in xrange(n)])
 
 #-------------------------------------------------------------------------------
@@ -69,11 +73,18 @@ def assert_almost_equal(a, b):
     if isinstance(a, dict) or isinstance(b, dict):
         return assert_dict_equal(a, b)
 
+    if isinstance(a, basestring):
+        assert a == b, (a, b)
+        return True
+
     if isiterable(a):
         np.testing.assert_(isiterable(b))
         np.testing.assert_equal(len(a), len(b))
-        for i in xrange(len(a)):
-            assert_almost_equal(a[i], b[i])
+        if np.array_equal(a, b):
+            return True
+        else:
+            for i in xrange(len(a)):
+                assert_almost_equal(a[i], b[i])
         return True
 
     err_msg = lambda a, b: 'expected %.5f but got %.5f' % (a, b)
@@ -106,19 +117,21 @@ def assert_dict_equal(a, b, compare_keys=True):
     for k in a_keys:
         assert_almost_equal(a[k], b[k])
 
-def assert_series_equal(left, right):
-    assert(left.dtype == right.dtype)
-    assert_almost_equal(left, right)
+def assert_series_equal(left, right, check_dtype=True):
+    assert_almost_equal(left.values, right.values)
+    if check_dtype:
+        assert(left.dtype == right.dtype)
     assert(left.index.equals(right.index))
 
 def assert_frame_equal(left, right):
     assert(isinstance(left, DataFrame))
     assert(isinstance(right, DataFrame))
-    for col, series in left.iteritems():
+    for col, series in left.iterkv():
         assert(col in right)
         assert_series_equal(series, right[col])
     for col in right:
         assert(col in left)
+    assert(left.index.equals(right.index))
     assert(left.columns.equals(right.columns))
 
 def assert_panel_equal(left, right):
@@ -126,7 +139,7 @@ def assert_panel_equal(left, right):
     assert(left.major_axis.equals(right.major_axis))
     assert(left.minor_axis.equals(right.minor_axis))
 
-    for col, series in left.iteritems():
+    for col, series in left.iterkv():
         assert(col in right)
         assert_frame_equal(series, right[col])
 
@@ -144,7 +157,11 @@ def makeStringIndex(k):
     return Index([rands(10) for _ in xrange(k)])
 
 def makeIntIndex(k):
-    return Index(np.arange(k))
+    return Index(range(k))
+
+def makeFloatIndex(k):
+    values = sorted(np.random.random_sample(k)) - np.random.random_sample(1)
+    return Index(values * (10 ** np.random.randint(0, 9)))
 
 def makeDateIndex(k):
     dates = list(DateRange(datetime(2000, 1, 1), periods=k))
@@ -209,9 +226,71 @@ def add_nans(panel):
         for j, col in enumerate(dm.columns):
             dm[col][:i + j] = np.NaN
 
-def makeLongPanel():
-    wp = makePanel()
-    add_nans(wp)
+class TestSubDict(dict):
+    def __init__(self, *args, **kwargs):
+        dict.__init__(self, *args, **kwargs)
 
-    return wp.to_long()
 
+# Dependency checks.  Copied this from Nipy/Nipype (Copyright of
+# respective developers, license: BSD-3)
+def package_check(pkg_name, version=None, app='pandas', checker=LooseVersion,
+                  exc_failed_import=ImportError,
+                  exc_failed_check=RuntimeError):
+    """Check that the minimal version of the required package is installed.
+
+    Parameters
+    ----------
+    pkg_name : string
+        Name of the required package.
+    version : string, optional
+        Minimal version number for required package.
+    app : string, optional
+        Application that is performing the check.  For instance, the
+        name of the tutorial being executed that depends on specific
+        packages.
+    checker : object, optional
+        The class that will perform the version checking.  Default is
+        distutils.version.LooseVersion.
+    exc_failed_import : Exception, optional
+        Class of the exception to be thrown if import failed.
+    exc_failed_check : Exception, optional
+        Class of the exception to be thrown if version check failed.
+
+    Examples
+    --------
+    package_check('numpy', '1.3')
+    package_check('networkx', '1.0', 'tutorial1')
+
+    """
+
+    if app:
+        msg = '%s requires %s' % (app, pkg_name)
+    else:
+        msg = 'module requires %s' % pkg_name
+    if version:
+      msg += ' with version >= %s' % (version,)
+    try:
+        mod = __import__(pkg_name)
+    except ImportError:
+        raise exc_failed_import(msg)
+    if not version:
+        return
+    try:
+        have_version = mod.__version__
+    except AttributeError:
+        raise exc_failed_check('Cannot find version for %s' % pkg_name)
+    if checker(have_version) < checker(version):
+        raise exc_failed_check(msg)
+
+def skip_if_no_package(*args, **kwargs):
+    """Raise SkipTest if package_check fails
+
+    Parameters
+    ----------
+    *args Positional parameters passed to `package_check`
+    *kwargs Keyword parameters passed to `package_check`
+    """
+    from nose import SkipTest
+    package_check(exc_failed_import=SkipTest,
+                  exc_failed_check=SkipTest,
+                  *args, **kwargs)

@@ -4,22 +4,21 @@
 pandas: powerful Python data analysis toolkit
 *********************************************
 
-.. note::
-
-    This documentation is currently (as of 8/26) undergoing heavy work. Check
-    back over the next week or two for continuous updates.
-
 `PDF Version <pandas.pdf>`__
 
 .. module:: pandas
 
 **Date**: |today| **Version**: |version|
 
-**Installers:** http://pypi.python.org/pypi/pandas
+**Binary Installers:** http://pypi.python.org/pypi/pandas
 
-**Code Repository:** http://github.com/wesm/pandas
+**Source Repository:** http://github.com/pydata/pandas
 
-**Mailing List:** http://groups.google.com/group/pystatsmodels
+**Issues & Ideas:** https://github.com/pydata/pandas/issues
+
+**Q&A Support:** http://stackoverflow.com/questions/tagged/pandas
+
+**Developer Mailing List:** http://groups.google.com/group/pystatsmodels
 
 **pandas** is a `Python <http://www.python.org>`__ package providing fast,
 flexible, and expressive data structures designed to make working with
@@ -107,23 +106,27 @@ See the package overview for more detail about what's in the library.
 
 .. toctree::
     :hidden:
-    :maxdepth: 2
+    :maxdepth: 3
 
+    whatsnew
     install
     faq
     overview
+    dsintro
     basics
     indexing
+    computation
     missing_data
     groupby
     merging
     reshaping
     timeseries
     visualization
-    stats
     io
     sparse
+    gotchas
     r_interface
     related
     comparison_with_r
     api
+

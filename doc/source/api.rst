@@ -5,6 +5,98 @@
 API Reference
 *************
 
+.. _api.functions:
+
+General functions
+-----------------
+
+Data manipulations
+~~~~~~~~~~~~~~~~~~
+.. currentmodule:: pandas.tools.pivot
+
+.. autosummary::
+   :toctree: generated/
+
+   pivot_table
+
+.. currentmodule:: pandas.tools.merge
+
+.. autosummary::
+   :toctree: generated/
+
+   merge
+   concat
+
+Pickling
+~~~~~~~~
+
+.. currentmodule:: pandas.core.common
+
+.. autosummary::
+   :toctree: generated/
+
+   load
+   save
+
+File IO
+~~~~~~~
+
+.. currentmodule:: pandas.io.parsers
+
+.. autosummary::
+   :toctree: generated/
+
+   read_table
+   read_csv
+   ExcelFile.parse
+
+HDFStore: PyTables (HDF5)
+~~~~~~~~~~~~~~~~~~~~~~~~~
+.. currentmodule:: pandas.io.pytables
+
+.. autosummary::
+   :toctree: generated/
+
+   HDFStore.put
+   HDFStore.get
+
+Standard moving window functions
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. currentmodule:: pandas.stats.moments
+
+.. autosummary::
+   :toctree: generated/
+
+   rolling_count
+   rolling_sum
+   rolling_mean
+   rolling_median
+   rolling_var
+   rolling_std
+   rolling_corr
+   rolling_cov
+   rolling_skew
+   rolling_kurt
+   rolling_apply
+   rolling_quantile
+
+Exponentially-weighted moving window functions
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+.. autosummary::
+   :toctree: generated/
+
+   ewma
+   ewmstd
+   ewmvar
+   ewmcorr
+   ewmcov
+
+.. currentmodule:: pandas
+
+.. _api.series:
+
 Series
 ------
 
@@ -18,6 +110,8 @@ Attributes and underlying data
 
    Series.values
    Series.dtype
+   Series.isnull
+   Series.notnull
 
 Conversion / Constructors
 ~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -87,12 +181,14 @@ Computations / Descriptive Stats
    Series.std
    Series.sum
    Series.var
+   Series.value_counts
 
 Reindexing / Selection / Label manipulation
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 .. autosummary::
    :toctree: generated/
 
+   Series.align
    Series.drop
    Series.reindex
    Series.reindex_like
@@ -154,11 +250,14 @@ Serialization / IO / Conversion
 .. autosummary::
    :toctree: generated/
 
+   Series.from_csv
    Series.load
    Series.save
    Series.to_csv
    Series.to_dict
    Series.to_sparse
+
+.. _api.dataframe:
 
 DataFrame
 ---------
@@ -174,6 +273,8 @@ Attributes and underlying data
    :toctree: generated/
 
    DataFrame.as_matrix
+   DataFrame.dtypes
+   DataFrame.get_dtype_counts
    DataFrame.values
    DataFrame.axes
    DataFrame.ndim
@@ -261,6 +362,9 @@ Reindexing / Selection / Label manipulation
 .. autosummary::
    :toctree: generated/
 
+   DataFrame.add_prefix
+   DataFrame.add_suffix
+   DataFrame.align
    DataFrame.drop
    DataFrame.filter
    DataFrame.reindex
@@ -303,6 +407,7 @@ Combining / joining / merging
    :toctree: generated/
 
    DataFrame.join
+   DataFrame.merge
    DataFrame.append
 
 Time series-related
@@ -331,6 +436,7 @@ Serialization / IO / Conversion
    DataFrame.from_csv
    DataFrame.from_records
    DataFrame.to_csv
+   DataFrame.to_excel
    DataFrame.to_dict
    DataFrame.to_records
    DataFrame.to_sparse
@@ -339,61 +445,13 @@ Serialization / IO / Conversion
    DataFrame.load
    DataFrame.info
 
+.. _api.panel:
+
 Panel
 -----
 
-Input / Output
---------------
+.. _api.panel.stats:
 
-File IO
-~~~~~~~
-
-HDFStore: PyTables (HDF5)
-~~~~~~~~~~~~~~~~~~~~~~~~~
-
-GroupBy
--------
-
-.. currentmodule:: pandas.core.groupby
-
-.. autosummary::
-   :toctree: generated/
-
-   groupby
-
-Moving window statistics
-------------------------
-
-Standard moving window functions
+Computations / Descriptive Stats
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-.. currentmodule:: pandas.stats.moments
-
-.. autosummary::
-   :toctree: generated/
-
-   rolling_count
-   rolling_sum
-   rolling_mean
-   rolling_median
-   rolling_var
-   rolling_std
-   rolling_corr
-   rolling_cov
-   rolling_skew
-   rolling_kurt
-   rolling_apply
-   rolling_quantile
-
-Exponentially-weighted moving window functions
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-.. autosummary::
-   :toctree: generated/
-
-   ewma
-   ewmstd
-   ewmvar
-   ewmcorr
-   ewmcov
 

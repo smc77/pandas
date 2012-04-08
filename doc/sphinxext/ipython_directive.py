@@ -90,7 +90,7 @@ from pdb import set_trace
 # Globals
 #-----------------------------------------------------------------------------
 # for tokenizing blocks
-COMMENT, INPUT, OUTPUT =  range(3)
+COMMENT, INPUT, OUTPUT = range(3)
 
 #-----------------------------------------------------------------------------
 # Functions and class declarations
@@ -196,7 +196,6 @@ class EmbeddedSphinxShell(object):
 
         self.cout = cStringIO.StringIO()
 
-
         # Create config object for IPython
         config = Config()
         config.Global.display_banner = False
@@ -215,6 +214,7 @@ class EmbeddedSphinxShell(object):
 
         # Create and initialize ipython, but don't start its mainloop
         IP = InteractiveShell.instance(config=config, profile_dir=profile)
+
         # io.stdout redirect must be done *after* instantiating InteractiveShell
         io.stdout = self.cout
         io.stderr = self.cout
@@ -299,13 +299,15 @@ class EmbeddedSphinxShell(object):
         is_verbatim = decorator=='@verbatim' or self.is_verbatim
         is_doctest = decorator=='@doctest' or self.is_doctest
         is_suppress = decorator=='@suppress' or self.is_suppress
+        is_okexcept = decorator=='@okexcept' or self.is_okexcept
         is_savefig = decorator is not None and \
                      decorator.startswith('@savefig')
 
         input_lines = input.split('\n')
 
+        self.datacontent = data
+
         continuation = '   %s:'%''.join(['.']*(len(str(lineno))+2))
-        Nc = len(continuation)
 
         if is_savefig:
             image_file, image_directive = self.process_image(decorator)
@@ -352,6 +354,9 @@ class EmbeddedSphinxShell(object):
         if not is_suppress and not is_semicolon:
             ret.append(output)
 
+        if not is_okexcept and "Traceback" in output:
+            sys.stdout.write(output)
+
         self.cout.truncate(0)
         return (ret, input_lines, output, is_doctest, image_file,
                     image_directive)
@@ -396,7 +401,8 @@ class EmbeddedSphinxShell(object):
         Saves the image file to disk.
         """
         self.ensure_pyplot()
-        command = 'plt.gcf().savefig("%s", bbox_inches="tight", dpi=150)'%image_file
+        command = ('plt.gcf().savefig("%s", bbox_inches="tight", '
+                   'dpi=100)' % image_file)
         #print 'SAVEFIG', command  # dbg
         self.process_input_line('bookmark ipy_thisdir', store_history=False)
         self.process_input_line('cd -b ipy_savedir', store_history=False)
@@ -596,6 +602,7 @@ class IpythonDirective(Directive):
                     'suppress' : directives.flag,
                     'verbatim' : directives.flag,
                     'doctest' : directives.flag,
+                    'okexcept' : directives.flag,
                   }
 
     shell = EmbeddedSphinxShell()
@@ -661,7 +668,8 @@ class IpythonDirective(Directive):
         self.shell.is_suppress = 'suppress' in options
         self.shell.is_doctest = 'doctest' in options
         self.shell.is_verbatim = 'verbatim' in options
-
+        self.shell.is_okexcept = 'okexcept' in options
+        self.shell.current_content = self.content
 
         # handle pure python code
         if 'python' in self.arguments:

@@ -1,9 +1,397 @@
+# pylint: disable=W0223
+
 from pandas.core.common import _asarray_tuplesafe
 from pandas.core.index import Index, MultiIndex
+import pandas.core.common as com
 
 import numpy as np
 
-class _SeriesIndexer(object):
+# "null slice"
+_NS = slice(None, None)
+
+
+class IndexingError(Exception):
+    pass
+
+
+class _NDFrameIndexer(object):
+
+    def __init__(self, obj):
+        self.obj = obj
+        self.ndim = obj.ndim
+
+    def __iter__(self):
+        raise NotImplementedError('ix is not iterable')
+
+    def __getitem__(self, key):
+        if isinstance(key, tuple):
+            try:
+                return self.obj.get_value(*key)
+            except Exception:
+                pass
+
+            return self._getitem_tuple(key)
+        else:
+            return self._getitem_axis(key, axis=0)
+
+    def _get_label(self, label, axis=0):
+        try:
+            return self.obj.xs(label, axis=axis, copy=False)
+        except Exception:
+            return self.obj.xs(label, axis=axis, copy=True)
+
+    def _slice(self, obj, axis=0):
+        return self.obj._slice(obj, axis=axis)
+
+    def __setitem__(self, key, value):
+        # kludgetastic
+        ax = self.obj._get_axis(0)
+        if isinstance(ax, MultiIndex):
+            try:
+                indexer = ax.get_loc(key)
+                self._setitem_with_indexer(indexer, value)
+                return
+            except Exception:
+                pass
+
+        if isinstance(key, tuple):
+            if len(key) > self.ndim:
+                raise IndexingError('only tuples of length <= %d supported',
+                                    self.ndim)
+            indexer = self._convert_tuple(key)
+        else:
+            indexer = self._convert_to_indexer(key)
+
+        self._setitem_with_indexer(indexer, value)
+
+    def _convert_tuple(self, key):
+        keyidx = []
+        for i, k in enumerate(key):
+            idx = self._convert_to_indexer(k, axis=i)
+            keyidx.append(idx)
+        return tuple(keyidx)
+
+    def _setitem_with_indexer(self, indexer, value):
+        # also has the side effect of consolidating in-place
+        if self.obj._is_mixed_type:
+            if not isinstance(indexer, tuple):
+                indexer = self._tuplify(indexer)
+
+            het_axis = self.obj._het_axis
+            het_idx = indexer[het_axis]
+
+            if isinstance(het_idx, (int, long)):
+                het_idx = [het_idx]
+
+            if not np.isscalar(value):
+                raise IndexingError('setting on mixed-type frames only '
+                                    'allowed with scalar values')
+
+            plane_indexer = indexer[:het_axis] + indexer[het_axis + 1:]
+            item_labels = self.obj._get_axis(het_axis)
+            for item in item_labels[het_idx]:
+                data = self.obj[item]
+                data.values[plane_indexer] = value
+        else:
+            if isinstance(indexer, tuple):
+                indexer = _maybe_convert_ix(*indexer)
+            self.obj.values[indexer] = value
+
+    def _getitem_tuple(self, tup):
+        try:
+            return self._getitem_lowerdim(tup)
+        except IndexingError:
+            pass
+
+        # no shortcut needed
+        retval = self.obj
+        for i, key in enumerate(tup):
+            if i >= self.obj.ndim:
+                raise IndexingError('Too many indexers')
+
+            if _is_null_slice(key):
+                continue
+
+            retval = retval.ix._getitem_axis(key, axis=i)
+
+        return retval
+
+    def _getitem_lowerdim(self, tup):
+        from pandas.core.frame import DataFrame
+
+        ax0 = self.obj._get_axis(0)
+        # a bit kludgy
+        if isinstance(ax0, MultiIndex):
+            try:
+                return self._get_label(tup, axis=0)
+            except TypeError:
+                # slices are unhashable
+                pass
+            except Exception:
+                if isinstance(tup[0], slice):
+                    raise IndexingError
+                if tup[0] not in ax0:
+                    raise
+
+        # to avoid wasted computation
+        # df.ix[d1:d2, 0] -> columns first (True)
+        # df.ix[0, ['C', 'B', A']] -> rows first (False)
+        for i, key in enumerate(tup):
+            if _is_label_like(key):
+                section = self._getitem_axis(key, axis=i)
+
+                # might have been a MultiIndex
+                if section.ndim == self.ndim:
+                    new_key = tup[:i] + (_NS,) + tup[i + 1:]
+                    # new_key = tup[:i] + tup[i+1:]
+                else:
+                    new_key = tup[:i] + tup[i + 1:]
+
+                    # unfortunately need an odious kludge here because of
+                    # DataFrame transposing convention
+                    if (isinstance(section, DataFrame) and i > 0
+                        and len(new_key) == 2):
+                        a, b = new_key
+                        new_key = b, a
+
+                    if len(new_key) == 1:
+                        new_key, = new_key
+
+                return section.ix[new_key]
+
+        raise IndexingError('not applicable')
+
+    def _getitem_axis(self, key, axis=0):
+        labels = self.obj._get_axis(axis)
+        if isinstance(key, slice):
+            return self._get_slice_axis(key, axis=axis)
+        elif _is_list_like(key) and not (isinstance(key, tuple) and
+                                         isinstance(labels, MultiIndex)):
+
+            if hasattr(key, 'ndim') and key.ndim > 1:
+                raise ValueError('Cannot index with multidimensional key')
+
+            return self._getitem_iterable(key, axis=axis)
+        elif axis == 0:
+            is_int_index = _is_integer_index(labels)
+
+            idx = key
+            if com.is_integer(key):
+                if isinstance(labels, MultiIndex):
+                    try:
+                        return self._get_label(key, axis=0)
+                    except (KeyError, TypeError):
+                        if _is_integer_index(self.obj.index.levels[0]):
+                            raise
+
+                if not is_int_index:
+                    idx = labels[key]
+
+            return self._get_label(idx, axis=0)
+        else:
+            labels = self.obj._get_axis(axis)
+            lab = key
+            if com.is_integer(key) and not _is_integer_index(labels):
+                lab = labels[key]
+            return self._get_label(lab, axis=axis)
+
+    def _getitem_iterable(self, key, axis=0):
+        labels = self.obj._get_axis(axis)
+        # axis_name = self.obj._get_axis_name(axis)
+
+        def _reindex(keys, level=None):
+            try:
+                return self.obj.reindex_axis(keys, axis=axis, level=level)
+            except AttributeError:
+                # Series
+                assert(axis == 0)
+                return self.obj.reindex(keys, level=level)
+
+        if com._is_bool_indexer(key):
+            key = _check_bool_indexer(labels, key)
+            return _reindex(labels[np.asarray(key)])
+        else:
+            if isinstance(key, Index):
+                # want Index objects to pass through untouched
+                keyarr = key
+            else:
+                # asarray can be unsafe, NumPy strings are weird
+                keyarr = _asarray_tuplesafe(key)
+            if _is_integer_dtype(keyarr) and not _is_integer_index(labels):
+                keyarr = labels.take(keyarr)
+
+            # this is not the most robust, but...
+            if (isinstance(labels, MultiIndex) and
+                not isinstance(keyarr[0], tuple)):
+                level = 0
+            else:
+                level = None
+
+            return _reindex(keyarr, level=level)
+
+    def _convert_to_indexer(self, obj, axis=0):
+        """
+        Convert indexing key into something we can use to do actual fancy
+        indexing on an ndarray
+
+        Examples
+        ix[:5] -> slice(0, 5)
+        ix[[1,2,3]] -> [1,2,3]
+        ix[['foo', 'bar', 'baz']] -> [i, j, k] (indices of foo, bar, baz)
+
+        Going by Zen of Python?
+        "In the face of ambiguity, refuse the temptation to guess."
+        raise AmbiguousIndexError with integer labels?
+        - No, prefer label-based indexing
+        """
+        labels = self.obj._get_axis(axis)
+        is_int_index = _is_integer_index(labels)
+
+        if com.is_integer(obj) and not is_int_index:
+            return obj
+
+        try:
+            return labels.get_loc(obj)
+        except (KeyError, TypeError):
+            pass
+
+        if isinstance(obj, slice):
+
+            int_slice = _is_index_slice(obj)
+            null_slice = obj.start is None and obj.stop is None
+            # could have integers in the first level of the MultiIndex
+            position_slice = (int_slice
+                              and not labels.inferred_type == 'integer'
+                              and not isinstance(labels, MultiIndex))
+
+            start, stop = obj.start, obj.stop
+
+            # last ditch effort: if we are mixed and have integers
+            try:
+                if 'mixed' in labels.inferred_type and int_slice:
+                    if start is not None:
+                        i = labels.get_loc(start)
+                    if stop is not None:
+                        j = labels.get_loc(stop)
+                    position_slice = False
+            except KeyError:
+                if labels.inferred_type == 'mixed-integer':
+                    raise
+
+            if null_slice or position_slice:
+                slicer = obj
+            else:
+                try:
+                    i, j = labels.slice_locs(start, stop)
+                    slicer = slice(i, j, obj.step)
+                except Exception:
+                    if _is_index_slice(obj):
+                        if labels.inferred_type == 'integer':
+                            raise
+                        slicer = obj
+                    else:
+                        raise
+
+            return slicer
+
+        elif _is_list_like(obj):
+            if com._is_bool_indexer(obj):
+                objarr = _check_bool_indexer(labels, obj)
+                return objarr
+            else:
+                objarr = _asarray_tuplesafe(obj)
+
+                # If have integer labels, defer to label-based indexing
+                if _is_integer_dtype(objarr) and not is_int_index:
+                    return objarr
+
+                indexer = labels.get_indexer(objarr)
+                mask = indexer == -1
+                if mask.any():
+                    raise KeyError('%s not in index' % objarr[mask])
+
+                return indexer
+        else:
+            return labels.get_loc(obj)
+
+    def _tuplify(self, loc):
+        tup = [slice(None, None) for _ in range(self.ndim)]
+        tup[0] = loc
+        return tuple(tup)
+
+    def _get_slice_axis(self, slice_obj, axis=0):
+        obj = self.obj
+
+        axis_name = obj._get_axis_name(axis)
+        labels = getattr(obj, axis_name)
+
+        int_slice = _is_index_slice(slice_obj)
+
+        start = slice_obj.start
+        stop = slice_obj.stop
+
+        # in case of providing all floats, use label-based indexing
+        float_slice = (labels.inferred_type == 'floating'
+                       and (type(start) == float or start is None)
+                       and (type(stop) == float or stop is None))
+
+        null_slice = slice_obj.start is None and slice_obj.stop is None
+
+        # could have integers in the first level of the MultiIndex, in which
+        # case we wouldn't want to do position-based slicing
+        position_slice = (int_slice
+                          and labels.inferred_type != 'integer'
+                          and not isinstance(labels, MultiIndex)
+                          and not float_slice)
+
+        # last ditch effort: if we are mixed and have integers
+        try:
+            if 'mixed' in labels.inferred_type and int_slice:
+                if start is not None:
+                    i = labels.get_loc(start)
+                if stop is not None:
+                    j = labels.get_loc(stop)
+                position_slice = False
+        except KeyError:
+            if labels.inferred_type == 'mixed-integer':
+                raise
+
+        if null_slice or position_slice:
+            slicer = slice_obj
+        else:
+            try:
+                i, j = labels.slice_locs(start, stop)
+                slicer = slice(i, j, slice_obj.step)
+            except Exception:
+                if _is_index_slice(slice_obj):
+                    if labels.inferred_type == 'integer':
+                        raise
+                    slicer = slice_obj
+                else:
+                    raise
+
+        if not _need_slice(slice_obj):
+            return obj
+
+        return self._slice(slicer, axis=axis)
+
+# 32-bit floating point machine epsilon
+_eps = np.finfo('f4').eps
+
+def _is_index_slice(obj):
+    def _is_valid_index(x):
+        return (com.is_integer(x) or com.is_float(x)
+                and np.allclose(x, int(x), rtol=_eps, atol=0))
+
+    def _crit(v):
+        return v is None or _is_valid_index(v)
+
+    both_none = obj.start is None and obj.stop is None
+
+    return not both_none and (_crit(obj.start) and _crit(obj.stop))
+
+
+class _SeriesIndexer(_NDFrameIndexer):
     """
     Class to support fancy indexing, potentially using labels
 
@@ -21,252 +409,38 @@ class _SeriesIndexer(object):
     >>> ts.ix[[date1, date2, date3]]
     >>> ts.ix[date1:date2] = 0
     """
-    def __init__(self, series):
-        self.series = series
 
-    def __getitem__(self, key):
-        op = self._fancy_index(key, operation='get')
-        return op()
+    def _get_label(self, key, axis=0):
+        return self.obj[key]
 
-    def __setitem__(self, key, value):
-        op = self._fancy_index(key, value, operation='set')
-        op()
+    def _slice(self, indexer, axis=0):
+        return self.obj._get_values(indexer)
 
-    def _fancy_index(self, key, value=None, operation='get'):
-        from pandas.core.series import Series
-
-        # going to great lengths to avoid code dup
-        series = self.series
-
-        if operation == 'get':
-            def do_default():
-                return series[key]
-
-            def do_list_like():
-                if isinstance(series.index, MultiIndex):
-                    try:
-                        return series[key]
-                    except (KeyError, TypeError, IndexError):
-                        pass
-                return series.reindex(key)
-        else:
-            def do_default():
-                series[key] = value
-
-            def do_list_like():
-                inds, mask = series.index.get_indexer(key)
-                if not mask.all():
-                    raise Exception('Indices %s not found' % key[-mask])
-                series.put(inds, value)
-        op = do_default
-        if _isboolarr(key):
-            if isinstance(key, Series):
-                if not key.index.equals(series.index):
-                    raise Exception('Cannot use boolean index with misaligned '
-                                    'or unequal labels')
-        elif isinstance(key, slice):
-            if _is_label_slice(series.index, key):
-                i, j = series.index.slice_locs(key.start, key.stop)
-                key = slice(i, j)
-        elif _is_list_like(key):
-            op = do_list_like
-        return op
+    def _setitem_with_indexer(self, indexer, value):
+        self.obj._set_values(indexer, value)
 
 
-class AmbiguousIndexError(Exception):
-    pass
+def _check_bool_indexer(ax, key):
+    # boolean indexing, need to check that the data are aligned, otherwise
+    # disallowed
+    result = key
+    if _is_series(key) and key.dtype == np.bool_:
+        if not key.index.equals(ax):
+            result = key.reindex(ax)
 
-class _DataFrameIndexer(object):
-    """
-    Class to support fancy indexing, potentially using labels of DataFrame
+    if isinstance(result, np.ndarray) and result.dtype == np.object_:
+        mask = com.isnull(result)
+        if mask.any():
+            raise IndexingError('cannot index with vector containing '
+                                'NA / NaN values')
 
-    Notes
-    -----
-    Indexing based on labels is INCLUSIVE
-    Slicing uses PYTHON SEMANTICS (endpoint is excluded)
+    return result
 
-    If Index contains int labels, these will be used rather than the locations,
-    so be very careful (ambiguous).
 
-    Examples
-    --------
-    >>> frame.ix[5:10, ['A', 'B']]
-    >>> frame.ix[date1:date2, 'A']
-    """
+def _is_series(obj):
+    from pandas.core.series import Series
+    return isinstance(obj, Series)
 
-    def __init__(self, frame):
-        self.frame = frame
-
-    def __getitem__(self, key):
-        if isinstance(key, slice):
-            return self._fancy_getitem_axis(key, axis=0)
-        elif isinstance(key, tuple):
-            return self._getitem_tuple(key)
-        elif _is_list_like(key):
-            return self._fancy_getitem_iterable(key, axis=0)
-        else:
-            return self._fancy_getitem_axis(key, axis=0)
-
-    def _getitem_tuple(self, key):
-        if isinstance(self.frame.index, MultiIndex):
-            try:
-                return self.frame.xs(key)
-            except (KeyError, TypeError):
-                # could do something more intelligent here? like raising the
-                # exception if each tuple value are in the levels?
-                pass
-
-        if len(key) != 2:
-            raise Exception('only length 2 tuple supported')
-        return self._fancy_getitem_tuple(*key)
-
-    def __setitem__(self, key, value):
-        # also has the side effect of consolidating in-place
-        if self.frame._is_mixed_type:
-            raise Exception('setting on mixed-type frames not yet supported')
-
-        if isinstance(key, tuple):
-            if len(key) != 2:
-                raise Exception('only length 2 tuple supported')
-
-            x, y = key
-            xidx = self._convert_to_indexer(x, axis=0)
-            yidx = self._convert_to_indexer(y, axis=1)
-            indexer = _maybe_convert_ix(xidx, yidx)
-        else:
-            indexer = self._convert_to_indexer(key)
-
-        self.frame.values[indexer] = value
-
-    def _convert_to_indexer(self, obj, axis=0):
-        """
-        Convert indexing key into something we can use to do actual fancy
-        indexing on an ndarray
-
-        Examples
-        ix[:5] -> slice(0, 5)
-        ix[[1,2,3]] -> [1,2,3]
-        ix[['foo', 'bar', 'baz']] -> [i, j, k] (indices of foo, bar, baz)
-
-        Going by Zen of Python?
-        "In the face of ambiguity, refuse the temptation to guess."
-        raise AmbiguousIndexError with integer labels?
-        - No, prefer label-based indexing
-        """
-        index = self.frame._get_axis(axis)
-        is_int_index = _is_integer_index(index)
-        if isinstance(obj, slice):
-            if _is_label_slice(index, obj):
-                i, j = index.slice_locs(obj.start, obj.stop)
-                return slice(i, j)
-            else:
-                return obj
-        elif _is_list_like(obj):
-            objarr = _asarray_tuplesafe(obj)
-
-            if objarr.dtype == np.bool_:
-                if not obj.index.equals(index):
-                    raise Exception('Cannot use boolean index with misaligned '
-                                    'or unequal labels')
-                return objarr
-            else:
-                # If have integer labels, defer to label-based indexing
-                if _is_integer_dtype(objarr) and not is_int_index:
-                    return objarr
-
-                indexer, mask = index.get_indexer(objarr)
-                if not mask.all():
-                    raise KeyError('%s not in index' % objarr[-mask])
-
-                return indexer
-        else:
-            if _is_int_like(obj) and not is_int_index:
-                return obj
-            return index.get_loc(obj)
-
-    def _fancy_getitem_tuple(self, rowkey, colkey):
-        # to avoid wasted computation
-        # df.ix[d1:d2, 0] -> columns first (True)
-        # df.ix[0, ['C', 'B', A']] -> rows first (False)
-        if _is_label_like(colkey):
-            return self._fancy_getitem_axis(colkey, axis=1).ix[rowkey]
-        elif _is_label_like(rowkey):
-            return self._fancy_getitem_axis(rowkey, axis=0).ix[colkey]
-
-        result = self._fancy_getitem_axis(colkey, axis=1)
-        return result.ix[rowkey]
-
-    def _fancy_getitem_axis(self, key, axis=0):
-        if isinstance(key, slice):
-            return self._get_slice_axis(key, axis=axis)
-        elif _is_list_like(key):
-            return self._fancy_getitem_iterable(key, axis=axis)
-        elif axis == 0:
-            is_int_index = _is_integer_index(self.frame.index)
-
-            idx = key
-            if _is_int_like(key):
-                if isinstance(self.frame.index, MultiIndex):
-                    try:
-                        return self.frame.xs(key)
-                    except (KeyError, TypeError):
-                        if _is_integer_index(self.frame.index.levels[0]):
-                            raise
-
-                if not is_int_index:
-                    idx = self.frame.index[key]
-
-            if self.frame._is_mixed_type:
-                return self.frame.xs(idx)
-            else:
-                # get a view if possible
-                return self.frame.xs(idx, copy=False)
-        else:
-            col = key
-            if _is_int_like(key) and not _is_integer_index(self.frame.columns):
-                col = self.frame.columns[key]
-            return self.frame[col]
-
-    def _fancy_getitem_iterable(self, key, axis=0):
-        from pandas.core.series import Series
-
-        labels = self.frame._get_axis(axis)
-        axis_name = self.frame._get_axis_name(axis)
-
-        # asarray can be unsafe, NumPy strings are weird
-        if isinstance(key, Index):
-            # want Index objects to pass through untouched
-            keyarr = key
-        else:
-            keyarr = _asarray_tuplesafe(key)
-
-        if keyarr.dtype == np.bool_:
-            if isinstance(key, Series):
-                if not key.index.equals(labels):
-                    raise Exception('Cannot use boolean index with misaligned '
-                                    'or unequal labels')
-            return self.frame.reindex(**{axis_name : labels[np.asarray(key)]})
-        else:
-            if _is_integer_dtype(keyarr) and not _is_integer_index(labels):
-                keyarr = labels.take(keyarr)
-
-            return self.frame.reindex(**{axis_name : keyarr})
-
-    def _get_slice_axis(self, slice_obj, axis=0):
-        frame = self.frame
-
-        axis_name = frame._get_axis_name(axis)
-        labels = getattr(frame, axis_name)
-        if _is_label_slice(labels, slice_obj):
-            i, j = labels.slice_locs(slice_obj.start, slice_obj.stop)
-            slicer = slice(i, j)
-        else:
-            slicer = slice_obj
-
-        if not _need_slice(slice_obj):
-            return frame
-
-        return frame._slice(slicer, axis=axis)
 
 def _maybe_convert_ix(*args):
     """
@@ -282,38 +456,34 @@ def _maybe_convert_ix(*args):
     else:
         return args
 
+
+def _is_null_slice(obj):
+    return (isinstance(obj, slice) and obj.start is None and
+            obj.stop is None and obj.step is None)
+
+
 def _is_integer_dtype(arr):
     return issubclass(arr.dtype.type, np.integer)
 
-def _is_integer_index(index):
-    # make an educated and not too intelligent guess
-    if len(index) == 0: # pragma: no cover
-        return False
-    else:
-        return _is_int_like(index[0])
 
-def _is_int_like(val):
-    return isinstance(val, (int, np.integer))
+def _is_integer_index(index):
+    return index.inferred_type == 'integer'
+
 
 def _is_label_like(key):
     # select a label or row
     return not isinstance(key, slice) and not _is_list_like(key)
 
+
 def _is_list_like(obj):
     return np.iterable(obj) and not isinstance(obj, basestring)
 
-def _is_label_slice(labels, obj):
-    def crit(x):
-        if x in labels:
-            return False
-        else:
-            return isinstance(x, int) or x is None
-    return not crit(obj.start) or not crit(obj.stop)
 
 def _need_slice(obj):
     return (obj.start is not None or
             obj.stop is not None or
             (obj.step is not None and obj.step != 1))
+
 
 def _maybe_droplevels(index, key):
     # drop levels
@@ -324,6 +494,3 @@ def _maybe_droplevels(index, key):
         index = index.droplevel(0)
 
     return index
-
-_isboolarr = lambda x: np.asarray(x).dtype == np.bool_
-

@@ -83,6 +83,11 @@ class TestDateRange(unittest.TestCase):
         self.assert_(comp[11])
         self.assert_(not comp[9])
 
+    def test_copy(self):
+        cp = self.rng.copy()
+        repr(cp)
+        self.assert_(cp.equals(self.rng))
+
     def test_repr(self):
         # only really care that it works
         repr(self.rng)
@@ -101,6 +106,11 @@ class TestDateRange(unittest.TestCase):
 
         # 32-bit vs. 64-bit platforms
         self.assertEquals(self.rng[4], self.rng[np.int_(4)])
+
+    def test_getitem_matplotlib_hackaround(self):
+        values = self.rng[:, None]
+        expected = self.rng.values[:, None]
+        self.assert_(np.array_equal(values, expected))
 
     def test_shift(self):
         shifted = self.rng.shift(5)
@@ -156,6 +166,74 @@ class TestDateRange(unittest.TestCase):
 
         the_union = self.rng.union(rng)
         self.assert_(not isinstance(the_union, DateRange))
+
+    def test_outer_join(self):
+        """ should behave just as union test"""
+        # overlapping
+        left = self.rng[:10]
+        right = self.rng[5:10]
+
+        the_join = left.join(right, how='outer')
+        self.assert_(isinstance(the_join, DateRange))
+
+        # non-overlapping, gap in middle
+        left = self.rng[:5]
+        right = self.rng[10:]
+
+        the_join = left.join(right, how='outer')
+        self.assert_(isinstance(the_join, Index))
+        self.assert_(not isinstance(the_join, DateRange))
+
+        # non-overlapping, no gap
+        left = self.rng[:5]
+        right = self.rng[5:10]
+
+        the_join = left.join(right, how='outer')
+        self.assert_(isinstance(the_join, DateRange))
+
+        # overlapping, but different offset
+        rng = DateRange(START, END, offset=datetools.bmonthEnd)
+
+        the_join = self.rng.join(rng, how='outer')
+        self.assert_(not isinstance(the_join, DateRange))
+
+    def test_union_not_cacheable(self):
+        rng = DateRange('1/1/2000', periods=50, offset=datetools.Minute())
+        rng1 = rng[10:]
+        rng2 = rng[:25]
+        the_union = rng1.union(rng2)
+        self.assert_(the_union.equals(rng))
+
+        rng1 = rng[10:]
+        rng2 = rng[15:35]
+        the_union = rng1.union(rng2)
+        expected = rng[10:]
+        self.assert_(the_union.equals(expected))
+
+    def test_intersection(self):
+        rng = DateRange('1/1/2000', periods=50, offset=datetools.Minute())
+        rng1 = rng[10:]
+        rng2 = rng[:25]
+        the_int = rng1.intersection(rng2)
+        expected = rng[10:25]
+        self.assert_(the_int.equals(expected))
+        self.assert_(isinstance(the_int, DateRange))
+        self.assert_(the_int.offset == rng.offset)
+
+        the_int = rng1.intersection(rng2.view(Index))
+        self.assert_(the_int.equals(expected))
+
+        # non-overlapping
+        the_int = rng[:10].intersection(rng[10:])
+        expected = Index([])
+        self.assert_(the_int.equals(expected))
+
+    def test_intersection_bug(self):
+        # GH #771
+        a = DateRange('11/30/2011','12/31/2011')
+        b = DateRange('12/10/2011','12/20/2011')
+        result = a.intersection(b)
+        self.assert_(result.equals(b))
 
     def test_with_tzinfo(self):
         _skip_if_no_pytz()
@@ -258,14 +336,54 @@ class TestDateRange(unittest.TestCase):
         self.assertRaises(Exception, daterange._infer_tzinfo, start, end)
         self.assertRaises(Exception, daterange._infer_tzinfo, end, start)
 
+    def test_date_parse_failure(self):
+        badly_formed_date = '2007/100/1'
+        self.assertRaises(ValueError, DateRange, start=badly_formed_date,
+                          periods=10)
+        self.assertRaises(ValueError, DateRange, end=badly_formed_date,
+                          periods=10)
+        self.assertRaises(ValueError, DateRange, badly_formed_date,
+                          badly_formed_date)
+
+    def test_equals(self):
+        self.assertFalse(self.rng.equals(list(self.rng)))
+
+    def test_daterange_bug_456(self):
+        # GH #456
+        rng1 = DateRange('12/5/2011', '12/5/2011')
+        rng2 = DateRange('12/2/2011', '12/5/2011')
+        rng2.offset = datetools.BDay()
+
+        result = rng1.union(rng2)
+        self.assert_(type(result) == DateRange)
+
+    def test_error_with_zero_monthends(self):
+        self.assertRaises(ValueError, DateRange, '1/1/2000', '1/1/2001',
+                          offset=datetools.MonthEnd(0))
+
+    def test_range_bug(self):
+        # GH #770
+        offset = datetools.DateOffset(months=3)
+        result = DateRange("2011-1-1", "2012-1-31", offset=offset)
+
+        start = datetime(2011, 1, 1)
+        exp_values = [start + i * offset for i in range(5)]
+        self.assert_(np.array_equal(result, exp_values))
+
+    def test_catch_infinite_loop(self):
+        offset = datetools.DateOffset(minute=5)
+        # blow up, don't loop forever
+        self.assertRaises(Exception, DateRange, datetime(2011,11,11),
+                          datetime(2011,11,12), offset=offset)
+
 def _skip_if_no_pytz():
     try:
         import pytz
     except ImportError:
+        import nose
         raise nose.SkipTest
 
 if __name__ == '__main__':
     import nose
     nose.runmodule(argv=[__file__,'-vvs','-x','--pdb', '--pdb-failure'],
                    exit=False)
-

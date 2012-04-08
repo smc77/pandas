@@ -5,22 +5,22 @@ to disk
 
 # pylint: disable-msg=E1101,W0613,W0603
 
-from datetime import datetime
+from datetime import datetime, date
 import time
 
 import numpy as np
-from pandas import (Series, TimeSeries, DataFrame, Panel, LongPanel,
-                    MultiIndex)
+from pandas import Series, TimeSeries, DataFrame, Panel, Index, MultiIndex
 from pandas.core.common import adjoin
-import pandas._tseries as _tseries
+import pandas.core.common as com
+import pandas._tseries as lib
+from contextlib import contextmanager
 
 # reading and writing the full object in one go
 _TYPE_MAP = {
     Series     : 'series',
     TimeSeries : 'series',
     DataFrame  : 'frame',
-    Panel  : 'wide',
-    LongPanel  : 'long'
+    Panel  : 'wide'
 }
 
 _NAME_MAP = {
@@ -31,7 +31,6 @@ _NAME_MAP = {
     'wide' : 'Panel',
     'wide_table' : 'Panel (Table)',
     'long' : 'LongPanel',
-
     # legacy h5 files
     'Series' : 'Series',
     'TimeSeries' : 'TimeSeries',
@@ -44,7 +43,8 @@ _LEGACY_MAP = {
     'Series' : 'legacy_series',
     'TimeSeries' : 'legacy_series',
     'DataFrame' : 'legacy_frame',
-    'DataMatrix' : 'legacy_frame'
+    'DataMatrix' : 'legacy_frame',
+    'WidePanel' : 'wide_table',
 }
 
 # oh the troubles to reduce import time
@@ -55,6 +55,52 @@ def _tables():
         import tables
         _table_mod = tables
     return _table_mod
+
+@contextmanager
+def get_store(path, mode='a', complevel=None, complib=None,
+              fletcher32=False):
+    """
+    Creates an HDFStore instance. This function can be used in a with statement
+
+    Parameters
+    ----------
+    path : string
+        File path to HDF5 file
+    mode : {'a', 'w', 'r', 'r+'}, default 'a'
+
+        ``'r'``
+            Read-only; no data can be modified.
+        ``'w'``
+            Write; a new file is created (an existing file with the same
+            name would be deleted).
+        ``'a'``
+            Append; an existing file is opened for reading and writing,
+            and if the file does not exist it is created.
+        ``'r+'``
+            It is similar to ``'a'``, but the file must already exist.
+    complevel : int, 1-9, default 0
+            If a complib is specified compression will be applied
+            where possible
+    complib : {'zlib', 'bzip2', 'lzo', 'blosc', None}, default None
+            If complevel is > 0 apply compression to objects written
+            in the store wherever possible
+    fletcher32 : bool, default False
+            If applying compression use the fletcher32 checksum
+
+    Examples
+    --------
+    >>> with get_store('test.h5') as store:
+    >>>     store['foo'] = bar   # write to HDF5
+    >>>     bar = store['foo']   # retrieve
+    """
+    store = None
+    try:
+        store = HDFStore(path, mode=mode, complevel=complevel,
+                         complib=complib, fletcher32=False)
+        yield store
+    finally:
+        if store is not None:
+            store.close()
 
 class HDFStore(object):
     """
@@ -73,7 +119,7 @@ class HDFStore(object):
 
         ``'r'``
             Read-only; no data can be modified.
-        ``'w``'
+        ``'w'``
             Write; a new file is created (an existing file with the same
             name would be deleted).
         ``'a'``
@@ -97,6 +143,8 @@ class HDFStore(object):
     >>> bar = store['foo']   # retrieve
     >>> store.close()
     """
+    _quiet = False
+
     def __init__(self, path, mode='a', complevel=None, complib=None,
                  fletcher32=False):
         try:
@@ -140,6 +188,13 @@ class HDFStore(object):
 
         return output
 
+    def keys(self):
+        """
+        Return a (potentially unordered) list of the keys corresponding to the
+        objects stored in the HDFStore
+        """
+        return self.handle.root._v_children.keys()
+
     def open(self, mode='a', warn=True):
         """
         Open the file in the specified mode
@@ -168,7 +223,14 @@ class HDFStore(object):
                                              self.complib,
                                              fletcher32=self.fletcher32)
 
-        self.handle = _tables().openFile(self.path, self.mode)
+        try:
+            self.handle = _tables().openFile(self.path, self.mode)
+        except IOError, e:  # pragma: no cover
+            if 'can not be written' in str(e):
+                print 'Opening %s in read-only mode' % self.path
+                self.handle = _tables().openFile(self.path, 'r')
+            else:
+                raise
 
     def close(self):
         """
@@ -241,7 +303,7 @@ class HDFStore(object):
         Parameters
         ----------
         key : object
-        value : {Series, DataFrame, Panel, LongPanel}
+        value : {Series, DataFrame, Panel}
         table : boolean, default False
             Write as a PyTables Table structure which may perform worse but
             allow more flexible operations like searching / selecting subsets of
@@ -279,8 +341,9 @@ class HDFStore(object):
         if where is None:
             self.handle.removeNode(self.handle.root, key, recursive=True)
         else:
-            group = getattr(self.handle.root, key)
-            self._delete_from_table(group, where)
+            group = getattr(self.handle.root, key,None)
+            if group is not None:
+                self._delete_from_table(group, where)
 
     def append(self, key, value):
         """
@@ -290,7 +353,7 @@ class HDFStore(object):
         Parameters
         ----------
         key : object
-        value : {Series, DataFrame, Panel, LongPanel}
+        value : {Series, DataFrame, Panel}
 
         Notes
         -----
@@ -328,6 +391,7 @@ class HDFStore(object):
     def _write_series(self, group, series):
         self._write_index(group, 'index', series.index)
         self._write_array(group, 'values', series.values)
+        group._v_attrs.name = series.name
 
     def _write_frame(self, group, df):
         self._write_block_manager(group, df._data)
@@ -359,13 +423,13 @@ class HDFStore(object):
 
         axes = []
         for i in xrange(ndim):
-            ax = _read_index(group, 'axis%d' % i)
+            ax = self._read_index(group, 'axis%d' % i)
             axes.append(ax)
 
         items = axes[0]
         blocks = []
         for i in range(group._v_attrs.nblocks):
-            blk_items = _read_index(group, 'block%d_items' % i)
+            blk_items = self._read_index(group, 'block%d_items' % i)
             values = _read_array(group, 'block%d_values' % i)
             blk = make_block(values, blk_items, items)
             blocks.append(blk)
@@ -399,34 +463,83 @@ class HDFStore(object):
     def _read_wide_table(self, group, where=None):
         return self._read_panel_table(group, where)
 
-    def _write_long(self, group, panel, append=False):
-        self._write_index(group, 'major_axis', panel.major_axis)
-        self._write_index(group, 'minor_axis', panel.minor_axis)
-        self._write_index(group, 'items', panel.items)
-        self._write_array(group, 'major_labels', panel.major_labels)
-        self._write_array(group, 'minor_labels', panel.minor_labels)
-        self._write_array(group, 'values', panel.values)
+    def _write_index(self, group, key, index):
+        if len(index) == 0:
+            raise ValueError('Can not write empty structure, axis length was 0')
 
-    def _read_long(self, group, where=None):
-        from pandas.core.index import MultiIndex
+        if isinstance(index, MultiIndex):
+            setattr(group._v_attrs, '%s_variety' % key, 'multi')
+            self._write_multi_index(group, key, index)
+        else:
+            setattr(group._v_attrs, '%s_variety' % key, 'regular')
+            converted, kind, _ = _convert_index(index)
+            self._write_array(group, key, converted)
+            node = getattr(group, key)
+            node._v_attrs.kind = kind
+            node._v_attrs.name = index.name
 
-        items = _read_index(group, 'items')
-        major_axis = _read_index(group, 'major_axis')
-        minor_axis = _read_index(group, 'minor_axis')
-        major_labels = _read_array(group, 'major_labels')
-        minor_labels = _read_array(group, 'minor_labels')
-        values = _read_array(group, 'values')
+    def _read_index(self, group, key):
+        variety = getattr(group._v_attrs, '%s_variety' % key)
 
-        index = MultiIndex(levels=[major_axis, minor_axis],
-                           labels=[major_labels, minor_labels])
-        return LongPanel(values, index=index, columns=items)
+        if variety == 'multi':
+            return self._read_multi_index(group, key)
+        elif variety == 'regular':
+            _, index = self._read_index_node(getattr(group, key))
+            return index
+        else:  # pragma: no cover
+            raise Exception('unrecognized index variety: %s' % variety)
 
-    def _write_index(self, group, key, value):
-        # don't care about type here
-        converted, kind, _ = _convert_index(value)
-        self._write_array(group, key, converted)
-        node = getattr(group, key)
-        node._v_attrs.kind = kind
+    def _write_multi_index(self, group, key, index):
+        setattr(group._v_attrs, '%s_nlevels' % key, index.nlevels)
+
+        for i, (lev, lab, name) in enumerate(zip(index.levels,
+                                                 index.labels,
+                                                 index.names)):
+            # write the level
+            conv_level, kind, _ = _convert_index(lev)
+            level_key = '%s_level%d' % (key, i)
+            self._write_array(group, level_key, conv_level)
+            node = getattr(group, level_key)
+            node._v_attrs.kind = kind
+            node._v_attrs.name = name
+
+            # write the name
+            setattr(node._v_attrs, '%s_name%d' % (key, i), name)
+
+            # write the labels
+            label_key = '%s_label%d' % (key, i)
+            self._write_array(group, label_key, lab)
+
+    def _read_multi_index(self, group, key):
+        nlevels = getattr(group._v_attrs, '%s_nlevels' % key)
+
+        levels = []
+        labels = []
+        names = []
+        for i in range(nlevels):
+            level_key = '%s_level%d' % (key, i)
+            name, lev = self._read_index_node(getattr(group, level_key))
+            levels.append(lev)
+            names.append(name)
+
+            label_key = '%s_label%d' % (key, i)
+            lab = getattr(group, label_key)[:]
+            labels.append(lab)
+
+        return MultiIndex(levels=levels, labels=labels, names=names)
+
+    def _read_index_node(self, node):
+        data = node[:]
+        kind = node._v_attrs.kind
+        name = None
+
+        if 'name' in node._v_attrs:
+            name = node._v_attrs.name
+
+        index = Index(_unconvert_index(data, kind))
+        index.name = name
+
+        return name, index
 
     def _write_array(self, group, key, value):
         if key in group:
@@ -496,6 +609,13 @@ class HDFStore(object):
         # add kinds
         table._v_attrs.index_kind = index_kind
         table._v_attrs.columns_kind = cols_kind
+        if append:
+            existing_fields = getattr(table._v_attrs,'fields',None)
+            if (existing_fields is not None and
+                existing_fields != list(items)):
+                raise Exception("appended items do not match existing items"
+                                " in table!")
+        # this depends on creation order of the table
         table._v_attrs.fields = list(items)
 
         # add the rows
@@ -531,25 +651,38 @@ class HDFStore(object):
         return handler(group, where)
 
     def _read_series(self, group, where=None):
-        index = _read_index(group, 'index')
+        index = self._read_index(group, 'index')
         values = _read_array(group, 'values')
-        return Series(values, index=index)
+        name = getattr(group._v_attrs, 'name', None)
+        return Series(values, index=index, name=name)
 
     def _read_legacy_series(self, group, where=None):
-        index = _read_index_legacy(group, 'index')
+        index = self._read_index_legacy(group, 'index')
         values = _read_array(group, 'values')
         return Series(values, index=index)
 
     def _read_legacy_frame(self, group, where=None):
-        index = _read_index_legacy(group, 'index')
-        columns = _read_index_legacy(group, 'columns')
+        index = self._read_index_legacy(group, 'index')
+        columns = self._read_index_legacy(group, 'columns')
         values = _read_array(group, 'values')
         return DataFrame(values, index=index, columns=columns)
+
+    def _read_index_legacy(self, group, key):
+        node = getattr(group, key)
+        data = node[:]
+        kind = node._v_attrs.kind
+
+        return _unconvert_index_legacy(data, kind)
 
     def _read_frame_table(self, group, where=None):
         return self._read_panel_table(group, where)['value']
 
     def _read_panel_table(self, group, where=None):
+        from pandas.core.index import unique_int64, Factor
+        from pandas.core.common import _asarray_tuplesafe
+        from pandas.core.internals import BlockManager
+        from pandas.core.reshape import block2d_to_block3d
+
         table = getattr(group, 'table')
 
         # create the selection
@@ -561,12 +694,51 @@ class HDFStore(object):
                                  table._v_attrs.columns_kind)
         index = _maybe_convert(sel.values['index'],
                                table._v_attrs.index_kind)
-        # reconstruct
-        long_index = MultiIndex.from_arrays([index, columns])
-        lp = LongPanel(sel.values['values'], index=long_index,
-                       columns=fields)
-        lp = lp.sortlevel(level=0)
-        wp = lp.to_wide()
+        values = sel.values['values']
+
+        major = Factor(index)
+        minor = Factor(columns)
+
+        J, K = len(major.levels), len(minor.levels)
+        key = major.labels * K + minor.labels
+
+        if len(unique_int64(key)) == len(key):
+            sorter, _ = lib.groupsort_indexer(key, J * K)
+
+            # the data need to be sorted
+            sorted_values = values.take(sorter, axis=0)
+            major_labels = major.labels.take(sorter)
+            minor_labels = minor.labels.take(sorter)
+
+            block = block2d_to_block3d(sorted_values, fields, (J, K),
+                                       major_labels, minor_labels)
+
+            mgr = BlockManager([block], [block.items,
+                                         major.levels, minor.levels])
+            wp = Panel(mgr)
+        else:
+            if not self._quiet:  # pragma: no cover
+                print ('Duplicate entries in table, taking most recently '
+                       'appended')
+
+            # reconstruct
+            long_index = MultiIndex.from_arrays([index, columns])
+            lp = DataFrame(values, index=long_index, columns=fields)
+
+            # need a better algorithm
+            tuple_index = long_index.get_tuple_index()
+            index_map = lib.map_indices_object(tuple_index)
+
+            unique_tuples = lib.fast_unique(tuple_index)
+            unique_tuples = _asarray_tuplesafe(unique_tuples)
+
+            indexer = lib.merge_indexer_object(unique_tuples, index_map)
+
+            new_index = long_index.take(indexer)
+            new_values = lp.values.take(indexer, axis=0)
+
+            lp = DataFrame(new_values, index=new_index, columns=lp.columns)
+            wp = lp.to_panel()
 
         if sel.column_filter:
             new_minor = sorted(set(wp.minor_axis) & sel.column_filter)
@@ -592,21 +764,29 @@ def _convert_index(index):
     # Let's assume the index is homogeneous
     values = np.asarray(index)
 
-    import time
     if isinstance(values[0], datetime):
-        converted = np.array([time.mktime(v.timetuple())
-                              for v in values], dtype=np.int64)
+        converted = np.array([(time.mktime(v.timetuple()) +
+                               v.microsecond / 1E6) for v in values],
+                               dtype=np.float64)
         return converted, 'datetime', _tables().Time64Col()
+    elif isinstance(values[0], date):
+        converted = np.array([time.mktime(v.timetuple()) for v in values],
+                             dtype=np.int32)
+        return converted, 'date', _tables().Time32Col()
     elif isinstance(values[0], basestring):
         converted = np.array(list(values), dtype=np.str_)
         itemsize = converted.dtype.itemsize
         return converted, 'string', _tables().StringCol(itemsize)
-    elif isinstance(values[0], (int, np.integer)):
+    elif com.is_integer(values[0]):
         # take a guess for now, hope the values fit
-        return np.asarray(values, dtype=int), 'integer', _tables().Int64Col()
+        atom = _tables().Int64Col()
+        return np.asarray(values, dtype=np.int64), 'integer', atom
+    elif com.is_float(values[0]):
+        atom = _tables().Float64Col()
+        return np.asarray(values, dtype=np.float64), 'float', atom
     else: # pragma: no cover
-        raise ValueError('unrecognized index type %s' % type(values[0]))
-
+        atom = _tables().ObjectAtom()
+        return np.asarray(values, dtype='O'), 'object', atom
 
 def _read_array(group, key):
     import tables
@@ -618,33 +798,25 @@ def _read_array(group, key):
     else:
         return data
 
-def _read_index(group, key):
-    node = getattr(group, key)
-    data = node[:]
-    kind = node._v_attrs.kind
-
-    return _unconvert_index(data, kind)
-
 def _unconvert_index(data, kind):
     if kind == 'datetime':
         index = np.array([datetime.fromtimestamp(v) for v in data],
                          dtype=object)
-    elif kind in ('string', 'integer'):
-        index = np.array(data, dtype=object)
+    elif kind == 'date':
+        index = np.array([date.fromtimestamp(v) for v in data],
+                         dtype=object)
+
+    elif kind in ('string', 'integer', 'float'):
+        index = np.array(data)
+    elif kind == 'object':
+        index = np.array(data[0])
     else: # pragma: no cover
         raise ValueError('unrecognized index type %s' % kind)
     return index
 
-def _read_index_legacy(group, key):
-    node = getattr(group, key)
-    data = node[:]
-    kind = node._v_attrs.kind
-
-    return _unconvert_index_legacy(data, kind)
-
 def _unconvert_index_legacy(data, kind, legacy=False):
     if kind == 'datetime':
-        index = _tseries.array_to_datetime(data)
+        index = lib.array_to_datetime(data)
     elif kind in ('string', 'integer'):
         index = np.array(data, dtype=object)
     else: # pragma: no cover
@@ -654,13 +826,13 @@ def _unconvert_index_legacy(data, kind, legacy=False):
 def _maybe_convert(values, val_kind):
     if _need_convert(val_kind):
         conv = _get_converter(val_kind)
-        conv = np.frompyfunc(conv, 1, 1)
+        # conv = np.frompyfunc(conv, 1, 1)
         values = conv(values)
     return values
 
 def _get_converter(kind):
     if kind == 'datetime':
-        return datetime.fromtimestamp
+        return lib.convert_timestamps
     else: # pragma: no cover
         raise ValueError('invalid kind %s' % kind)
 

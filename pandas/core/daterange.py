@@ -22,6 +22,8 @@ def _bin_op(op):
 _CACHE_START = datetime(1950, 1, 1)
 _CACHE_END   = datetime(2030, 1, 1)
 
+_daterange_cache = {}
+
 class DateRange(Index):
     """
     Fixed frequency date range according to input parameters.
@@ -43,10 +45,9 @@ class DateRange(Index):
     tzinfo : pytz.timezone
         To endow DateRange with time zone information
     """
-    _cache = {}
     def __new__(cls, start=None, end=None, periods=None,
                 offset=datetools.bday, time_rule=None,
-                tzinfo=None, **kwds):
+                tzinfo=None, name=None, **kwds):
 
         time_rule = kwds.get('timeRule', time_rule)
         if time_rule is not None:
@@ -65,17 +66,22 @@ class DateRange(Index):
         start = datetools.to_datetime(start)
         end = datetools.to_datetime(end)
 
-        # inside cache range. Handle UTC case
+        if start is not None and not isinstance(start, datetime):
+            raise ValueError('Failed to convert %s to datetime' % start)
 
-        useCache = (offset.isAnchored() and
-                    isinstance(offset, datetools.CacheableOffset))
+        if end is not None and not isinstance(end, datetime):
+            raise ValueError('Failed to convert %s to datetime' % end)
+
+        # inside cache range. Handle UTC case
+        useCache = _will_use_cache(offset)
 
         start, end, tzinfo = _figure_out_timezone(start, end, tzinfo)
         useCache = useCache and _naive_in_cache_range(start, end)
 
         if useCache:
             index = cls._cached_range(start, end, periods=periods,
-                                      offset=offset, time_rule=time_rule)
+                                      offset=offset, time_rule=time_rule,
+                                      name=name)
             if tzinfo is None:
                 return index
         else:
@@ -88,6 +94,7 @@ class DateRange(Index):
 
         index = np.array(index, dtype=object, copy=False)
         index = index.view(cls)
+        index.name = name
         index.offset = offset
         index.tzinfo = tzinfo
         return index
@@ -114,12 +121,22 @@ class DateRange(Index):
         self.tzinfo = tzinfo
         Index.__setstate__(self, *index_state)
 
+    def equals(self, other):
+        if self is other:
+            return True
+
+        if not isinstance(other, Index):
+            return False
+
+        return Index.equals(self.view(Index), other)
+
+    @property
     def is_all_dates(self):
         return True
 
     @classmethod
     def _cached_range(cls, start=None, end=None, periods=None, offset=None,
-                      time_rule=None):
+                      time_rule=None, name=None):
 
         # HACK: fix this dependency later
         if time_rule is not None:
@@ -128,16 +145,17 @@ class DateRange(Index):
         if offset is None:
             raise Exception('Must provide a DateOffset!')
 
-        if offset not in cls._cache:
+        if offset not in _daterange_cache:
             xdr = generate_range(_CACHE_START, _CACHE_END, offset=offset)
             arr = np.array(list(xdr), dtype=object, copy=False)
 
             cachedRange = arr.view(DateRange)
             cachedRange.offset = offset
             cachedRange.tzinfo = None
-            cls._cache[offset] = cachedRange
+            cachedRange.name = None
+            _daterange_cache[offset] = cachedRange
         else:
-            cachedRange = cls._cache[offset]
+            cachedRange = _daterange_cache[offset]
 
         if start is None:
             if end is None:
@@ -149,13 +167,13 @@ class DateRange(Index):
 
             end = offset.rollback(end)
 
-            endLoc = cachedRange.indexMap[end] + 1
+            endLoc = cachedRange.get_loc(end) + 1
             startLoc = endLoc - periods
         elif end is None:
             assert(isinstance(start, datetime))
             start = offset.rollforward(start)
 
-            startLoc = cachedRange.indexMap[start]
+            startLoc = cachedRange.get_loc(start)
             if periods is None:
                 raise Exception('Must provide number of periods!')
 
@@ -164,11 +182,11 @@ class DateRange(Index):
             start = offset.rollforward(start)
             end = offset.rollback(end)
 
-            startLoc = cachedRange.indexMap[start]
-            endLoc = cachedRange.indexMap[end] + 1
+            startLoc = cachedRange.get_loc(start)
+            endLoc = cachedRange.get_loc(end) + 1
 
         indexSlice = cachedRange[startLoc:endLoc]
-
+        indexSlice.name = name
         return indexSlice
 
     def __array_finalize__(self, obj):
@@ -200,9 +218,13 @@ class DateRange(Index):
                 new_index.offset = self.offset
 
             new_index.tzinfo = self.tzinfo
+            new_index.name = self.name
             return new_index
         else:
-            return Index(result)
+            if result.ndim > 1:
+                return result
+
+            return Index(result, name=self.name)
 
     def summary(self):
         if len(self) > 0:
@@ -249,7 +271,7 @@ class DateRange(Index):
 
         start = self[0] + n * self.offset
         end = self[-1] + n * self.offset
-        return DateRange(start, end, offset=self.offset)
+        return DateRange(start, end, offset=self.offset, name=self.name)
 
     def union(self, other):
         """
@@ -268,6 +290,29 @@ class DateRange(Index):
         if not isinstance(other, DateRange) or other.offset != self.offset:
             return Index.union(self.view(Index), other)
 
+        if self._can_fast_union(other):
+            return self._fast_union(other)
+        else:
+            return Index.union(self, other)
+
+    def _wrap_union_result(self, other, result):
+        # If we are here, _can_fast_union is false or other is not a
+        # DateRange, so their union has to be an Index.
+        name = self.name if self.name == other.name else None
+        return Index(result, name=name)
+
+    def _wrap_joined_index(self, joined, other):
+        name = self.name if self.name == other.name else None
+        if (isinstance(other, DateRange)
+            and self.offset == other.offset
+            and self._can_fast_union(other)):
+            joined = self._view_like(joined)
+            joined.name = name
+            return joined
+        else:
+            return Index(joined, name=name)
+
+    def _can_fast_union(self, other):
         offset = self.offset
 
         # to make our life easier, "sort" the two ranges
@@ -276,15 +321,73 @@ class DateRange(Index):
         else:
             left, right = other, self
 
-        left_start, left_end = left[0], left[-1]
-        right_start, right_end = right[0], right[-1]
+        left_end = left[-1]
+        right_start = right[0]
 
         # Only need to "adjoin", not overlap
-        if (left_end + offset) >= right_start:
-            return DateRange(left_start, max(left_end, right_end),
-                             offset=offset)
+        return (left_end + offset) >= right_start
+
+    def _fast_union(self, other):
+        # to make our life easier, "sort" the two ranges
+        if self[0] <= other[0]:
+            left, right = self, other
         else:
-            return Index.union(self, other)
+            left, right = other, self
+
+        left_start, left_end = left[0], left[-1]
+        right_end = right[-1]
+
+        if not _will_use_cache(self.offset):
+            # concatenate dates
+            if left_end < right_end:
+                loc = right.searchsorted(left_end, side='right')
+                right_chunk = right.values[loc:]
+                dates = np.concatenate((left.values, right_chunk))
+                return self._view_like(dates)
+            else:
+                return left
+        else:
+            return DateRange(left_start, max(left_end, right_end),
+                             offset=left.offset)
+
+    def intersection(self, other):
+        """
+        Specialized intersection for DateRange objects. May be much faster than
+        Index.union
+
+        Parameters
+        ----------
+        other : DateRange or array-like
+
+        Returns
+        -------
+        y : Index or DateRange
+        """
+        if not isinstance(other, DateRange) or other.offset != self.offset:
+            return Index.intersection(self.view(Index), other)
+
+        # to make our life easier, "sort" the two ranges
+        if self[0] <= other[0]:
+            left, right = self, other
+        else:
+            left, right = other, self
+
+        end = min(left[-1], right[-1])
+        start = right[0]
+
+        if end < start:
+            return Index([])
+        else:
+            lslice = slice(*left.slice_locs(start, end))
+            left_chunk = left.values[lslice]
+            return self._view_like(left_chunk)
+
+    def _view_like(self, ndarray):
+        result = ndarray.view(DateRange)
+        result.offset = self.offset
+        result.tzinfo = self.tzinfo
+        result.name = self.name
+        return result
 
     def tz_normalize(self, tz):
         """
@@ -298,6 +401,7 @@ class DateRange(Index):
         new_dates = new_dates.view(DateRange)
         new_dates.offset = self.offset
         new_dates.tzinfo = tz
+        new_dates.name = self.name
         return new_dates
 
     def tz_localize(self, tz):
@@ -312,6 +416,7 @@ class DateRange(Index):
         new_dates = new_dates.view(DateRange)
         new_dates.offset = self.offset
         new_dates.tzinfo = tz
+        new_dates.name = self.name
         return new_dates
 
     def tz_validate(self):
@@ -397,11 +502,15 @@ def generate_range(start=None, end=None, periods=None,
     if offset._normalizeFirst:
         cur = datetools.normalize_date(cur)
 
+    next_date = cur
     while cur <= end:
         yield cur
 
         # faster than cur + offset
-        cur = offset.apply(cur)
+        next_date = offset.apply(cur)
+        if next_date <= cur:
+            raise ValueError('Offset %s did not increment date' % offset)
+        cur = next_date
 
 # Do I want to cache UTC dates? Can't decide...
 
@@ -471,6 +580,11 @@ def _infer_tzinfo(start, end):
     elif end is not None:
         tz = _infer(end, start)
     return tz
+
+def _will_use_cache(offset):
+    return (offset.isAnchored() and
+            isinstance(offset, datetools.CacheableOffset))
+
 
 if __name__ == '__main__':
     import pytz

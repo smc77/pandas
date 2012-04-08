@@ -7,7 +7,7 @@ from pandas.core.frame import DataFrame
 from pandas.core.panel import Panel
 from pandas.core.series import Series
 import pandas.stats.common as common
-from pandas.stats.math import chain_dot, inv
+from pandas.stats.math import inv
 from pandas.stats.ols import _combine_rhs
 
 class VAR(object):
@@ -23,7 +23,10 @@ class VAR(object):
     """
 
     def __init__(self, data, p=1, intercept=True):
-        import scikits.statsmodels.tsa.var as sm_var
+        try:
+            import statsmodels.tsa.var as sm_var
+        except ImportError:
+            import scikits.statsmodels.tsa.var as sm_var
 
         self._data = DataFrame(_combine_rhs(data))
         self._p = p
@@ -571,3 +574,13 @@ def _drop_incomplete_rows(array):
 
 def _make_param_name(lag, name):
     return 'L%d.%s' % (lag, name)
+
+def chain_dot(*matrices):
+    """
+    Returns the dot product of the given matrices.
+
+    Parameters
+    ----------
+    matrices: argument list of ndarray
+    """
+    return reduce(lambda x, y: np.dot(y, x), matrices[::-1])
